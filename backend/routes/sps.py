@@ -8,7 +8,7 @@ from pydantic import BaseModel
 import json
 
 from backend.database import get_db
-from backend.models import StoredProcedure, MigrationStatus, AuditLog
+from backend.models import SourceSP, MigrationState, VirtualNode, ChangeLog
 
 
 router = APIRouter()
@@ -24,6 +24,8 @@ class SPResponse(BaseModel):
     called_by: int
     target_tables: List[str]
     migration_status: str
+    is_virtual: bool = False
+    parent_sp_name: Optional[str] = None
     
     class Config:
         from_attributes = True
@@ -51,25 +53,37 @@ async def list_sps(
     category: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
+    include_hidden: bool = Query(False),
     db: Session = Depends(get_db)
 ):
-    """List all stored procedures with optional filters"""
-    query = db.query(StoredProcedure, MigrationStatus).outerjoin(
-        MigrationStatus, StoredProcedure.id == MigrationStatus.sp_id
+    """
+    List all stored procedures with optional filters
+    Merges source SPs (non-hidden) with virtual nodes
+    """
+    # Get source SPs
+    query = db.query(SourceSP, MigrationState).outerjoin(
+        MigrationState, SourceSP.id == MigrationState.source_sp_id
     )
     
     if category:
-        query = query.filter(StoredProcedure.category == category)
+        query = query.filter(SourceSP.category == category)
     if search:
-        query = query.filter(StoredProcedure.name.ilike(f"%{search}%"))
+        query = query.filter(SourceSP.name.ilike(f"%{search}%"))
     
     results = query.all()
     
     sps = []
-    for sp, status_obj in results:
-        status_val = status_obj.status if status_obj else "Not Started"
+    
+    # Add non-hidden source SPs
+    for sp, state in results:
+        is_hidden = state.is_hidden if state else False
+        if is_hidden and not include_hidden:
+            continue
+            
+        status_val = state.status if state else "Not Started"
         if status and status_val != status:
             continue
+            
         sps.append({
             "name": sp.name,
             "category": sp.category or "Unknown",
@@ -78,7 +92,28 @@ async def list_sps(
             "calls": json.loads(sp.calls) if sp.calls else [],
             "called_by": sp.called_by or 0,
             "target_tables": json.loads(sp.target_tables) if sp.target_tables else [],
-            "migration_status": status_val
+            "migration_status": status_val,
+            "is_virtual": False,
+            "parent_sp_name": None
+        })
+    
+    # Add virtual nodes
+    virtual_nodes = db.query(VirtualNode, SourceSP).join(
+        SourceSP, VirtualNode.parent_sp_id == SourceSP.id
+    ).all()
+    
+    for vn, parent in virtual_nodes:
+        sps.append({
+            "name": vn.name,
+            "category": vn.node_type.capitalize(),
+            "reason": f"Virtual node split from {parent.name}",
+            "loc": 0,
+            "calls": json.loads(vn.inherited_calls) if vn.inherited_calls else [],
+            "called_by": 0,
+            "target_tables": json.loads(vn.inherited_tables) if vn.inherited_tables else [],
+            "migration_status": "Not Started",
+            "is_virtual": True,
+            "parent_sp_name": parent.name
         })
     
     return sps
@@ -87,11 +122,11 @@ async def list_sps(
 @router.get("/sps/{name}", response_model=SPDetailResponse)
 async def get_sp(name: str, db: Session = Depends(get_db)):
     """Get a single SP with full details including DDL"""
-    sp = db.query(StoredProcedure).filter(StoredProcedure.name == name).first()
+    sp = db.query(SourceSP).filter(SourceSP.name == name).first()
     if not sp:
         raise HTTPException(status_code=404, detail="SP not found")
     
-    status = db.query(MigrationStatus).filter(MigrationStatus.sp_id == sp.id).first()
+    status = db.query(MigrationState).filter(MigrationState.source_sp_id == sp.id).first()
     
     return {
         "name": sp.name,
@@ -110,11 +145,11 @@ async def get_sp(name: str, db: Session = Depends(get_db)):
 @router.patch("/sps/{name}/status")
 async def update_status(name: str, update: StatusUpdate, db: Session = Depends(get_db)):
     """Update migration status for an SP"""
-    sp = db.query(StoredProcedure).filter(StoredProcedure.name == name).first()
+    sp = db.query(SourceSP).filter(SourceSP.name == name).first()
     if not sp:
         raise HTTPException(status_code=404, detail="SP not found")
     
-    status = db.query(MigrationStatus).filter(MigrationStatus.sp_id == sp.id).first()
+    status = db.query(MigrationState).filter(MigrationState.source_sp_id == sp.id).first()
     old_status = status.status if status else "Not Started"
     
     if status:
@@ -124,8 +159,8 @@ async def update_status(name: str, update: StatusUpdate, db: Session = Depends(g
         if update.user:
             status.updated_by = update.user
     else:
-        status = MigrationStatus(
-            sp_id=sp.id,
+        status = MigrationState(
+            source_sp_id=sp.id,
             status=update.status,
             notes=update.notes,
             updated_by=update.user
@@ -133,11 +168,12 @@ async def update_status(name: str, update: StatusUpdate, db: Session = Depends(g
         db.add(status)
     
     # Audit log
-    log = AuditLog(
-        sp_id=sp.id,
+    log = ChangeLog(
+        entity_type="source_sp",
+        entity_id=sp.id,
         action="status_change",
-        old_value=old_status,
-        new_value=update.status,
+        old_state=old_status,
+        new_state=update.status,
         user=update.user
     )
     db.add(log)
@@ -149,8 +185,8 @@ async def update_status(name: str, update: StatusUpdate, db: Session = Depends(g
 @router.get("/stats", response_model=StatsResponse)
 async def get_stats(db: Session = Depends(get_db)):
     """Get category and status counts"""
-    sps = db.query(StoredProcedure).all()
-    statuses = {s.sp_id: s.status for s in db.query(MigrationStatus).all()}
+    sps = db.query(SourceSP).all()
+    statuses = {s.source_sp_id: s.status for s in db.query(MigrationState).all()}
     
     by_category = {}
     by_status = {}
@@ -172,7 +208,7 @@ async def get_stats(db: Session = Depends(get_db)):
 @router.get("/edges")
 async def get_edges(db: Session = Depends(get_db)):
     """Get call graph edges"""
-    sps = db.query(StoredProcedure).all()
+    sps = db.query(SourceSP).all()
     sp_names = {sp.name.upper(): sp.name for sp in sps}
     
     edges = []
@@ -189,7 +225,7 @@ async def get_edges(db: Session = Depends(get_db)):
 @router.get("/clusters")
 async def get_clusters(db: Session = Depends(get_db)):
     """Get orphan SPs grouped by target table"""
-    sps = db.query(StoredProcedure).all()
+    sps = db.query(SourceSP).all()
     
     # Find connected SPs
     connected = set()

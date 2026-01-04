@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 import os
 
 from backend.database import engine, Base
-from backend.routes import sps
+from backend.routes import sps, virtual_nodes
 
 
 @asynccontextmanager
@@ -38,6 +38,7 @@ templates = Jinja2Templates(directory=templates_path)
 
 # Include API routes
 app.include_router(sps.router, prefix="/api", tags=["Stored Procedures"])
+app.include_router(virtual_nodes.router, prefix="/api", tags=["Virtual Nodes"])
 
 
 @app.get("/", response_class=HTMLResponse)
