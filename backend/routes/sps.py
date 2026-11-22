@@ -54,7 +54,12 @@ class StatsResponse(BaseModel):
 
 
 def _json_load(val: Optional[str]) -> list:
-    return json.loads(val) if val else []
+    if not val:
+        return []
+    try:
+        return json.loads(val)
+    except (json.JSONDecodeError, TypeError):
+        return []
 
 
 def _obj_to_dict(obj: SourceObject, status_val: str, include_deps: bool = False) -> dict:
@@ -109,23 +114,34 @@ async def list_objects(
             continue
         items.append(_obj_to_dict(obj, status_val))
 
-    # Merge virtual nodes
+    # Merge virtual nodes — apply the same filters
     vns = db.query(VirtualNode, SourceObject).join(
         SourceObject, VirtualNode.parent_object_id == SourceObject.id
     ).all()
     for vn, parent in vns:
+        vn_type = parent.object_type
+        vn_cat = vn.node_type.capitalize() if vn.node_type else "Unknown"
+        vn_status = "Not Started"
+        if object_type and vn_type != object_type:
+            continue
+        if category and vn_cat != category:
+            continue
+        if status and vn_status != status:
+            continue
+        if search and search.lower() not in vn.name.lower():
+            continue
         items.append({
             "name": vn.name,
-            "object_type": parent.object_type,
+            "object_type": vn_type,
             "schema_name": parent.schema_name or "",
-            "category": vn.node_type.capitalize() if vn.node_type else "Unknown",
+            "category": vn_cat,
             "reason": f"Virtual node split from {parent.name}",
             "loc": 0,
             "calls": _json_load(vn.inherited_calls),
             "called_by": 0,
             "target_tables": _json_load(vn.inherited_tables),
             "dependencies": [],
-            "migration_status": "Not Started",
+            "migration_status": vn_status,
             "is_virtual": True,
             "parent_name": parent.name,
         })
@@ -183,7 +199,8 @@ async def update_status(name: str, update: StatusUpdate, db: Session = Depends(g
 
 @router.get("/stats", response_model=StatsResponse)
 async def get_stats(db: Session = Depends(get_db)):
-    objects = db.query(SourceObject).all()
+    hidden_ids = {s.source_object_id for s in db.query(MigrationState).filter(MigrationState.is_hidden == True).all()}
+    objects = [o for o in db.query(SourceObject).all() if o.id not in hidden_ids]
     statuses = {s.source_object_id: s.status for s in db.query(MigrationState).all()}
 
     by_type: dict = {}
@@ -206,31 +223,43 @@ async def get_stats(db: Session = Depends(get_db)):
 @router.get("/edges")
 async def get_edges(db: Session = Depends(get_db)):
     """Call graph edges (procedure→procedure) + dependency edges (view/proc→table/view)."""
-    objects = db.query(SourceObject).all()
+    hidden_ids = {s.source_object_id for s in db.query(MigrationState).filter(MigrationState.is_hidden == True).all()}
+    objects = [o for o in db.query(SourceObject).all() if o.id not in hidden_ids]
     name_map = {o.name.upper(): o.name for o in objects}
     edges = []
 
     for obj in objects:
-        # Procedure call edges
         calls = _json_load(obj.calls)
         for callee in calls:
             clean = callee.split(".")[-1].strip('"').upper()
             if clean in name_map:
                 edges.append({"source": obj.name, "target": name_map[clean], "type": "calls"})
 
-        # Write edges (writes to)
         targets = _json_load(obj.target_tables)
         for tgt in targets:
             clean = tgt.split(".")[-1].strip('"').upper()
             if clean in name_map:
                 edges.append({"source": obj.name, "target": name_map[clean], "type": "writes_to"})
 
-        # Read dependency edges
         deps = _json_load(obj.dependencies)
         for dep in deps:
             clean = dep.split(".")[-1].strip('"').upper()
             if clean in name_map:
                 edges.append({"source": obj.name, "target": name_map[clean], "type": "reads_from"})
+
+    # Virtual node edges
+    vns = db.query(VirtualNode, SourceObject).join(
+        SourceObject, VirtualNode.parent_object_id == SourceObject.id
+    ).all()
+    for vn, parent in vns:
+        for callee in _json_load(vn.inherited_calls):
+            clean = callee.split(".")[-1].strip('"').upper()
+            if clean in name_map:
+                edges.append({"source": vn.name, "target": name_map[clean], "type": "calls"})
+        for tgt in _json_load(vn.inherited_tables):
+            clean = tgt.split(".")[-1].strip('"').upper()
+            if clean in name_map:
+                edges.append({"source": vn.name, "target": name_map[clean], "type": "writes_to"})
 
     return edges
 

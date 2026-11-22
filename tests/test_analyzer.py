@@ -170,6 +170,30 @@ class TestProcedureClassification:
         result = SQLAnalyzer.analyze_procedure("FIX_BAK_TABLE", ddl, [])
         assert result["category"] == "Legacy"
 
+    def test_legacy_no_false_match_device(self):
+        """DEVICE should not trigger Legacy — _DEV requires a non-word boundary after it."""
+        ddl = """
+        CREATE OR REPLACE PROCEDURE LOAD_DEVICE_DATA()
+        RETURNS STRING LANGUAGE SQL
+        AS $$
+        INSERT INTO DW.DIM_DEVICE SELECT * FROM STAGING.RAW_DEVICES;
+        $$;
+        """
+        result = SQLAnalyzer.analyze_procedure("LOAD_DEVICE_DATA", ddl, [])
+        assert result["category"] != "Legacy"
+
+    def test_legacy_no_false_match_bakery(self):
+        """_BAKERY should not trigger Legacy — _BAK requires a non-word boundary after it."""
+        ddl = """
+        CREATE OR REPLACE PROCEDURE PROCESS_BAKERY()
+        RETURNS STRING LANGUAGE SQL
+        AS $$
+        INSERT INTO DW.DIM_BAKERY SELECT * FROM STAGING.RAW_BAKERY;
+        $$;
+        """
+        result = SQLAnalyzer.analyze_procedure("PROCESS_BAKERY", ddl, [])
+        assert result["category"] != "Legacy"
+
     def test_unknown_no_ops_no_calls(self):
         ddl = """
         CREATE OR REPLACE PROCEDURE DO_NOTHING()
@@ -446,6 +470,17 @@ class TestDependencyExtraction:
         body = "SELECT * FROM UPDATES WHERE inserted = 1 AND deleted = 0 AND merged IS NULL;"
         count = SQLAnalyzer._count_sql_ops(body)
         assert count == 0
+
+    def test_sql_ops_no_false_match_last_update(self):
+        body = "SELECT LAST_UPDATE FROM T WHERE is_truncated = 1;"
+        count = SQLAnalyzer._count_sql_ops(body)
+        assert count == 0
+
+    def test_truncate_only_detected_as_write(self):
+        ddl = "AS $$ TRUNCATE TABLE DW.STAGING_TMP; $$"
+        writes = SQLAnalyzer.extract_write_tables(ddl)
+        write_names = [w.upper() for w in writes]
+        assert "DW.STAGING_TMP" in write_names
 
 
 # ---------------------------------------------------------------------------

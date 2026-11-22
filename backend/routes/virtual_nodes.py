@@ -112,6 +112,7 @@ async def unsplit_node(name: str, request: SplitRequest, db: Session = Depends(g
         raise HTTPException(status_code=400, detail="Object is not split")
 
     state = db.query(MigrationState).filter(MigrationState.source_object_id == obj.id).first()
+    vn_names = [vn.name for vn in vns]
     for vn in vns:
         db.delete(vn)
     if state:
@@ -121,7 +122,7 @@ async def unsplit_node(name: str, request: SplitRequest, db: Session = Depends(g
         action="unsplit",
         entity_type="source_object",
         entity_id=obj.id,
-        old_state=json.dumps({"is_hidden": True, "virtual_nodes": [vn.name for vn in vns]}),
+        old_state=json.dumps({"is_hidden": True, "virtual_nodes": vn_names}),
         new_state=json.dumps({"is_hidden": False}),
         user=request.user,
     ))

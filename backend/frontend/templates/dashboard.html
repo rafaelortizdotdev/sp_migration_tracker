@@ -441,6 +441,11 @@
         <label><input type="checkbox" id="showClusters" checked> Show Clusters</label>
         <label><input type="checkbox" id="showDeps"> Show Dependencies</label>
         <label><input type="checkbox" id="showLabels" checked> Labels</label>
+        <span style="margin-left:auto;font-size:12px;color:var(--text-muted);display:flex;gap:16px;align-items:center">
+            <span><svg width="24" height="4"><line x1="0" y1="2" x2="24" y2="2" stroke="#475569" stroke-width="1.5"/></svg> calls</span>
+            <span><svg width="24" height="4"><line x1="0" y1="2" x2="24" y2="2" stroke="#f59e0b" stroke-width="1.5"/></svg> writes</span>
+            <span><svg width="24" height="4"><line x1="0" y1="2" x2="24" y2="2" stroke="#7dd3fc" stroke-width="1" stroke-dasharray="3,3"/></svg> reads</span>
+        </span>
     </div>
     <div id="graph-container"></div>
 </div>
@@ -498,23 +503,35 @@ let sortDir = 1;
 // ---- Data fetching ----
 async function fetchJSON(url) {
     const r = await fetch(url);
+    if (!r.ok) throw new Error(`API error: ${r.status} ${r.statusText}`);
     return r.json();
 }
 
+let _graphData = null;
+let _graphInitialized = false;
+
 async function init() {
-    const [objects, stats, edges, clusters] = await Promise.all([
-        fetchJSON(`${API}/objects`),
-        fetchJSON(`${API}/stats`),
-        fetchJSON(`${API}/edges`),
-        fetchJSON(`${API}/clusters`),
-    ]);
+    let objects, stats, edges, clusters;
+    try {
+        [objects, stats, edges, clusters] = await Promise.all([
+            fetchJSON(`${API}/objects`),
+            fetchJSON(`${API}/stats`),
+            fetchJSON(`${API}/edges`),
+            fetchJSON(`${API}/clusters`),
+        ]);
+    } catch (err) {
+        document.getElementById('inventoryBody').innerHTML =
+            `<tr><td colspan="7" style="color:var(--red);padding:24px;text-align:center">
+            Failed to load data: ${err.message}</td></tr>`;
+        return;
+    }
     allObjects = objects;
     renderHeader(stats);
     renderProgress(stats);
     populateCategoryFilter(stats);
     renderInventory();
-    renderPipelines(objects, edges, clusters);
-    initGraph(objects, edges, clusters);
+    try { renderPipelines(objects, edges, clusters); } catch(e) { console.error('Pipelines:', e); }
+    _graphData = { objects, edges, clusters };
 }
 
 // ---- Header & Progress ----
@@ -605,7 +622,7 @@ function renderInventory() {
     `).join('');
 }
 
-function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML.replace(/'/g,'&#39;').replace(/"/g,'&quot;'); }
 
 // ---- Sort ----
 document.querySelectorAll('.inv-table th[data-sort]').forEach(th => {
@@ -627,33 +644,45 @@ document.getElementById('filterStatus').addEventListener('change', renderInvento
 async function updateStatus(sel) {
     const name = sel.dataset.name;
     const status = sel.value;
-    await fetch(`${API}/objects/${encodeURIComponent(name)}/status`, {
+    const r = await fetch(`${API}/objects/${encodeURIComponent(name)}/status`, {
         method: 'PATCH',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({status}),
     });
+    if (!r.ok) {
+        const err = await r.json().catch(() => ({detail: r.statusText}));
+        alert(`Failed to update status: ${err.detail || r.statusText}`);
+        const obj = allObjects.find(o => o.name === name);
+        if (obj) sel.value = obj.migration_status;
+        return;
+    }
     const obj = allObjects.find(o => o.name === name);
     if (obj) obj.migration_status = status;
-    // Refresh stats
     const stats = await fetchJSON(`${API}/stats`);
     renderProgress(stats);
 }
 
 // ---- Code Viewer ----
 async function viewCode(name) {
-    const data = await fetchJSON(`${API}/objects/${encodeURIComponent(name)}`);
-    document.getElementById('modalTitle').textContent = data.name;
-    document.getElementById('modalMeta').innerHTML = `
-        <span>Type: <strong>${data.object_type}</strong></span>
-        <span>Category: <strong>${data.category}</strong></span>
-        <span>LOC: <strong>${data.loc}</strong></span>
-        <span>Targets: <strong>${(data.target_tables||[]).join(', ')||'none'}</strong></span>
-        <span>Deps: <strong>${(data.dependencies||[]).join(', ')||'none'}</strong></span>
-    `;
-    const codeEl = document.getElementById('modalCode');
-    codeEl.textContent = data.ddl || '-- No DDL available';
-    hljs.highlightElement(codeEl);
-    document.getElementById('codeModal').classList.add('open');
+    try {
+        const data = await fetchJSON(`${API}/objects/${encodeURIComponent(name)}`);
+        document.getElementById('modalTitle').textContent = data.name;
+        document.getElementById('modalMeta').innerHTML = `
+            <span>Type: <strong>${esc(data.object_type)}</strong></span>
+            <span>Category: <strong>${esc(data.category)}</strong></span>
+            <span>LOC: <strong>${data.loc}</strong></span>
+            <span>Targets: <strong>${esc((data.target_tables||[]).join(', ')||'none')}</strong></span>
+            <span>Deps: <strong>${esc((data.dependencies||[]).join(', ')||'none')}</strong></span>
+        `;
+        const codeEl = document.getElementById('modalCode');
+        codeEl.textContent = data.ddl || '-- No DDL available';
+        delete codeEl.dataset.highlighted;
+        codeEl.className = 'language-sql';
+        hljs.highlightElement(codeEl);
+        document.getElementById('codeModal').classList.add('open');
+    } catch (err) {
+        alert(`Failed to load DDL: ${err.message}`);
+    }
 }
 document.getElementById('modalClose').addEventListener('click', () => {
     document.getElementById('codeModal').classList.remove('open');
@@ -669,6 +698,11 @@ document.querySelectorAll('.tab').forEach(tab => {
         document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
         tab.classList.add('active');
         document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+        if (tab.dataset.tab === 'graph' && !_graphInitialized && _graphData) {
+            _graphInitialized = true;
+            try { initGraph(_graphData.objects, _graphData.edges, _graphData.clusters); }
+            catch(e) { console.error('Graph:', e); }
+        }
     });
 });
 
@@ -737,6 +771,14 @@ function initGraph(objects, edges, clusters) {
     const showDeps = document.getElementById('showDeps');
     const showClustersChk = document.getElementById('showClusters');
 
+    let currentLabels = null;
+
+    showLabels.addEventListener('change', () => {
+        if (currentLabels) {
+            currentLabels.style('display', showLabels.checked ? 'block' : 'none');
+        }
+    });
+
     function buildGraph() {
         g.selectAll('*').remove();
 
@@ -798,7 +840,7 @@ function initGraph(objects, edges, clusters) {
 
         const links = g.append('g').selectAll('line')
             .data(validEdges).enter().append('line')
-            .attr('stroke', d => d.type === 'reads_from' ? '#334155' : d.type === 'writes_to' ? '#f59e0b' : (d.type === 'cluster' ? '#1e293b' : '#475569'))
+            .attr('stroke', d => d.type === 'reads_from' ? '#7dd3fc' : d.type === 'writes_to' ? '#f59e0b' : (d.type === 'cluster' ? '#475569' : '#94a3b8'))
             .attr('stroke-width', d => d.type === 'cluster' ? 0.5 : 1)
             .attr('stroke-dasharray', d => d.type === 'reads_from' ? '3,3' : 'none');
 
@@ -838,9 +880,7 @@ function initGraph(objects, edges, clusters) {
             .attr('dy', 3)
             .style('display', showLabels.checked ? 'block' : 'none');
 
-        showLabels.addEventListener('change', () => {
-            labels.style('display', showLabels.checked ? 'block' : 'none');
-        });
+        currentLabels = labels;
 
         // Hover tooltip
         nodeG.on('mouseover', (e, d) => {

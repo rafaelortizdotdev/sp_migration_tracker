@@ -95,7 +95,7 @@ class SQLAnalyzer:
         body = cls._strip_comments(cls._extract_body_sql(ddl))
         stmts = cls._safe_parse(body)
 
-        write_types = (exp.Insert, exp.Merge, exp.Update, exp.Delete, exp.Drop)
+        write_types = (exp.Insert, exp.Merge, exp.Update, exp.Delete, exp.Drop, exp.TruncateTable)
 
         for stmt in stmts:
             if stmt is None:
@@ -106,6 +106,13 @@ class SQLAnalyzer:
                     name = cls._normalize_table(tgt)
                     if name:
                         tables.add(name)
+            for cmd in stmt.find_all(exp.Command):
+                if cmd.this and cmd.this.upper() == "TRUNCATE":
+                    tgt = cmd.find(exp.Table)
+                    if tgt:
+                        name = cls._normalize_table(tgt)
+                        if name:
+                            tables.add(name)
 
         if not tables:
             tables = cls._regex_extract_targets(cls._strip_comments(ddl))
@@ -205,7 +212,7 @@ class SQLAnalyzer:
         sql_ops = cls._count_sql_ops(body)
 
         has_control = bool(re.search(r'\bCONTROL\b|\bETL_|\bBATCH_ID|\bJOB_ID', body, re.IGNORECASE))
-        has_legacy = bool(re.search(r'(?:_DEV|_BAK|JUNK)', ddl, re.IGNORECASE))
+        has_legacy = bool(re.search(r'(?<![a-zA-Z0-9])(?:DEV|BAK|JUNK)(?![a-zA-Z0-9])', ddl or name or "", re.IGNORECASE))
         has_scheduler_kw = bool(re.search(r'REFRESH|BATCH|DAILY|SYNC|LOAD_ALL|SCHEDULER', name, re.IGNORECASE))
 
         is_root = call_count > 0 and called_by_count == 0
@@ -234,7 +241,7 @@ class SQLAnalyzer:
     def classify_view(cls, name: str, ddl: str, dep_count: int) -> Tuple[str, str]:
         """Classify a view based on its query structure."""
         is_mat = bool(re.search(r'\bMATERIALIZED\b', ddl, re.IGNORECASE))
-        has_legacy = bool(re.search(r'(?:_DEV|_BAK|JUNK)', ddl, re.IGNORECASE))
+        has_legacy = bool(re.search(r'(?<![a-zA-Z0-9])(?:DEV|BAK|JUNK)(?![a-zA-Z0-9])', ddl or name or "", re.IGNORECASE))
 
         if has_legacy:
             return "Legacy", "References DEV/BAK/JUNK schemas"
@@ -265,7 +272,7 @@ class SQLAnalyzer:
     @classmethod
     def classify_table(cls, name: str, ddl: str) -> Tuple[str, str]:
         """Classify a table as a dependency node — always 'Table'."""
-        has_legacy = bool(re.search(r'(?:_DEV|_BAK|JUNK)', ddl or name or "", re.IGNORECASE))
+        has_legacy = bool(re.search(r'(?<![a-zA-Z0-9])(?:DEV|BAK|JUNK)(?![a-zA-Z0-9])', ddl or name or "", re.IGNORECASE))
         if has_legacy:
             return "Legacy", "Table in DEV/BAK/JUNK schema"
         return "Table", "Data table (dependency node)"
@@ -392,7 +399,7 @@ class SQLAnalyzer:
     def _count_sql_ops(body: str) -> int:
         """Count distinct SQL write operations. Each statement type counted once per occurrence."""
         count = 0
-        for op in ["INSERT\\s+INTO", "UPDATE\\s+\\w", "DELETE\\s+FROM",
-                    "MERGE\\s+INTO", "TRUNCATE", "CREATE\\s+TABLE"]:
+        for op in [r"\bINSERT\s+INTO\b", r"\bUPDATE\s+(?!SET\b)\w", r"\bDELETE\s+FROM\b",
+                    r"\bMERGE\s+INTO\b", r"\bTRUNCATE\b", r"\bCREATE\s+(?:OR\s+REPLACE\s+)?TABLE\b"]:
             count += len(re.findall(op, body, re.IGNORECASE))
         return count

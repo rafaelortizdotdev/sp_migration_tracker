@@ -21,7 +21,7 @@
     "name": "SP_LOAD_DIM_DATE",
     "object_type": "procedure",
     "schema_name": "DW",
-    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_LOAD_DIM_DATE()\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nINSERT INTO DW.DIM_DATE (day_date, year_num, quarter_num, month_num, week_num, day_of_week, is_weekend, fiscal_year, fiscal_quarter)\nSELECT\n  d.day_date,\n  YEAR(d.day_date),\n  QUARTER(d.day_date),\n  MONTH(d.day_date),\n  WEEKOFYEAR(d.day_date),\n  DAYOFWEEK(d.day_date),\n  CASE WHEN DAYOFWEEK(d.day_date) IN (0, 6) THEN TRUE ELSE FALSE END,\n  CASE WHEN MONTH(d.day_date) >= 7 THEN YEAR(d.day_date) + 1 ELSE YEAR(d.day_date) END,\n  CASE WHEN MONTH(d.day_date) >= 7 THEN QUARTER(d.day_date) - 2 ELSE QUARTER(d.day_date) + 2 END\nFROM (\n  SELECT DATEADD(DAY, SEQ4(), '2020-01-01')::DATE AS day_date\n  FROM TABLE(GENERATOR(ROWCOUNT => 3650))\n) d\nWHERE d.day_date NOT IN (SELECT day_date FROM DW.DIM_DATE);\n$$;"
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_LOAD_DIM_DATE()\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nINSERT INTO DW.DIM_DATE (date_key, day_date, year_num, quarter_num, month_num, week_num, day_of_week, is_weekend, fiscal_year, fiscal_quarter)\nSELECT\n  TO_NUMBER(TO_CHAR(d.day_date, 'YYYYMMDD')),\n  d.day_date,\n  YEAR(d.day_date),\n  QUARTER(d.day_date),\n  MONTH(d.day_date),\n  WEEKOFYEAR(d.day_date),\n  DAYOFWEEK(d.day_date),\n  CASE WHEN DAYOFWEEK(d.day_date) IN (0, 6) THEN TRUE ELSE FALSE END,\n  CASE WHEN MONTH(d.day_date) >= 7 THEN YEAR(d.day_date) + 1 ELSE YEAR(d.day_date) END,\n  CASE WHEN MONTH(d.day_date) >= 7 THEN QUARTER(d.day_date) - 2 ELSE QUARTER(d.day_date) + 2 END\nFROM (\n  SELECT DATEADD(DAY, SEQ4(), '2020-01-01')::DATE AS day_date\n  FROM TABLE(GENERATOR(ROWCOUNT => 3650))\n) d\nWHERE d.day_date NOT IN (SELECT day_date FROM DW.DIM_DATE);\n$$;"
   },
   {
     "name": "SP_LOAD_FACT_SALES",
@@ -63,13 +63,13 @@
     "name": "SP_ARCHIVE_OLD_DATA",
     "object_type": "procedure",
     "schema_name": "DW",
-    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_ARCHIVE_OLD_DATA(\"CUTOFF_DATE\" DATE)\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nINSERT INTO ARCHIVE.FACT_SALES_HIST\nSELECT * FROM DW.FACT_SALES f\nJOIN DW.DIM_DATE d ON f.date_key = d.date_key\nWHERE d.day_date < :cutoff_date;\n\nDELETE FROM DW.FACT_SALES\nWHERE date_key IN (\n  SELECT date_key FROM DW.DIM_DATE WHERE day_date < :cutoff_date\n);\n\nCALL DW.SP_LOG_ETL_STATUS('Archive completed for dates before ' || :cutoff_date);\n$$;"
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_ARCHIVE_OLD_DATA(\"CUTOFF_DATE\" DATE)\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nINSERT INTO ARCHIVE.FACT_SALES_HIST (sale_id, store_id, product_id, date_key, quantity, unit_price, discount_pct, net_amount, tax_amount, total_amount, etl_batch_id)\nSELECT f.sale_id, f.store_id, f.product_id, f.date_key, f.quantity, f.unit_price, f.discount_pct, f.net_amount, f.tax_amount, f.total_amount, f.etl_batch_id\nFROM DW.FACT_SALES f\nJOIN DW.DIM_DATE d ON f.date_key = d.date_key\nWHERE d.day_date < :cutoff_date;\n\nDELETE FROM DW.FACT_SALES\nWHERE date_key IN (\n  SELECT date_key FROM DW.DIM_DATE WHERE day_date < :cutoff_date\n);\n\nCALL DW.SP_LOG_ETL_STATUS('Archive completed for dates before ' || :cutoff_date);\n$$;"
   },
   {
     "name": "SP_CURRENCY_CONVERT",
     "object_type": "procedure",
     "schema_name": "DW",
-    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_CURRENCY_CONVERT(\"TARGET_CURRENCY\" VARCHAR)\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nUPDATE DW.FACT_SALES f\nSET f.total_amount_usd = f.total_amount * r.exchange_rate,\n    f.currency_code = :target_currency\nFROM DW.LKP_EXCHANGE_RATES r\nWHERE f.currency_code = r.source_currency\n  AND r.target_currency = :target_currency\n  AND f.date_key BETWEEN r.effective_from AND r.effective_to;\n$$;"
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_CURRENCY_CONVERT(\"TARGET_CURRENCY\" VARCHAR)\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nUPDATE DW.FACT_SALES f\nSET f.total_amount_usd = f.total_amount * r.exchange_rate,\n    f.currency_code = :target_currency\nFROM DW.LKP_EXCHANGE_RATES r\nJOIN DW.DIM_DATE d ON f.date_key = d.date_key\nWHERE f.currency_code = r.source_currency\n  AND r.target_currency = :target_currency\n  AND d.day_date BETWEEN r.effective_from AND r.effective_to;\n$$;"
   },
   {
     "name": "SP_WEEKLY_RESTOCK_SYNC",
