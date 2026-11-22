@@ -4,33 +4,17 @@ API integration tests — exercises endpoints against a test database.
 import pytest
 import sys
 import os
-import json
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-from backend.database import Base, get_db
+from backend.database import Base
 from backend.main import app
 from backend.models import SourceObject, MigrationState
+from tests.conftest import engine, TestSession
 
 
-# Use in-memory SQLite for tests
-engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-TestSession = sessionmaker(bind=engine)
-
-
-def override_get_db():
-    db = TestSession()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-app.dependency_overrides[get_db] = override_get_db
 client = TestClient(app)
 
 
@@ -38,7 +22,10 @@ client = TestClient(app)
 def setup_db():
     Base.metadata.create_all(bind=engine)
     db = TestSession()
-    # Seed test data
+    db.query(MigrationState).delete()
+    db.query(SourceObject).delete()
+    db.commit()
+
     proc = SourceObject(
         name="LOAD_SALES",
         object_type="procedure",
@@ -143,7 +130,6 @@ class TestStatusUpdate:
         assert r.status_code == 200
         assert r.json()["status"] == "In Progress"
 
-        # Verify persisted
         r2 = client.get("/api/objects/LOAD_SALES")
         assert r2.json()["migration_status"] == "In Progress"
 
