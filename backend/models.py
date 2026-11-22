@@ -23,6 +23,12 @@ class SourceObject(Base):
     target_tables = Column(Text) # JSON array — tables written to
     dependencies = Column(Text)  # JSON array — tables/views read from
     source_hash = Column(String(64))
+    language = Column(String(30))
+    has_dynamic_sql = Column(Boolean, default=False)
+    parse_method = Column(String(30))
+    is_legacy = Column(Boolean, default=False)
+    legacy_reason = Column(Text)
+    references_legacy = Column(Boolean, default=False)
     imported_at = Column(DateTime, server_default=func.now())
 
     __table_args__ = (

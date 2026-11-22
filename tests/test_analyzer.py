@@ -49,7 +49,9 @@ class TestEdgeCases:
         result = SQLAnalyzer.analyze_procedure("TEST", ddl, [])
         expected_keys = {"name", "object_type", "schema_name", "ddl", "category",
                          "reason", "loc", "calls", "called_by", "target_tables",
-                         "dependencies", "source_hash"}
+                         "dependencies", "source_hash", "language", "has_dynamic_sql",
+                         "parse_method", "is_legacy", "legacy_reason",
+                         "references_legacy"}
         assert set(result.keys()) == expected_keys
 
     def test_analyze_view_returns_all_keys(self):
@@ -57,14 +59,18 @@ class TestEdgeCases:
         result = SQLAnalyzer.analyze_view("V1", ddl)
         expected_keys = {"name", "object_type", "schema_name", "ddl", "category",
                          "reason", "loc", "calls", "called_by", "target_tables",
-                         "dependencies", "source_hash"}
+                         "dependencies", "source_hash", "language", "has_dynamic_sql",
+                         "parse_method", "is_legacy", "legacy_reason",
+                         "references_legacy"}
         assert set(result.keys()) == expected_keys
 
     def test_analyze_table_returns_all_keys(self):
         result = SQLAnalyzer.analyze_table("T1", "CREATE TABLE T1 (id INT);")
         expected_keys = {"name", "object_type", "schema_name", "ddl", "category",
                          "reason", "loc", "calls", "called_by", "target_tables",
-                         "dependencies", "source_hash"}
+                         "dependencies", "source_hash", "language", "has_dynamic_sql",
+                         "parse_method", "is_legacy", "legacy_reason",
+                         "references_legacy"}
         assert set(result.keys()) == expected_keys
 
 
@@ -155,11 +161,13 @@ class TestProcedureClassification:
         SELECT * FROM JUNK.TEMP_TABLE;
         $$;
         """
-        result = SQLAnalyzer.analyze_procedure("OLD_JUNK_LOADER", ddl, [])
-        assert result["category"] == "Legacy"
+        result = SQLAnalyzer.analyze_procedure("OLD_JUNK_LOADER", ddl, [], schema_name="DW")
+        assert result["category"] == "Unknown"
+        assert result["is_legacy"] is True
+        assert "JUNK" in result["legacy_reason"]
 
-    def test_legacy_trumps_transformation(self):
-        """Legacy with SQL ops still classifies as Legacy because legacy check comes first."""
+    def test_legacy_preserves_real_category(self):
+        """Legacy flag does not override the real structural category."""
         ddl = """
         CREATE OR REPLACE PROCEDURE FIX_BAK_TABLE()
         RETURNS STRING LANGUAGE SQL
@@ -168,10 +176,12 @@ class TestProcedureClassification:
         $$;
         """
         result = SQLAnalyzer.analyze_procedure("FIX_BAK_TABLE", ddl, [])
-        assert result["category"] == "Legacy"
+        assert result["category"] == "Transformation"
+        assert result["is_legacy"] is True
+        assert "BAK" in result["legacy_reason"]
 
     def test_legacy_no_false_match_device(self):
-        """DEVICE should not trigger Legacy — _DEV requires a non-word boundary after it."""
+        """DEVICE should not trigger legacy — DEV requires a non-word boundary."""
         ddl = """
         CREATE OR REPLACE PROCEDURE LOAD_DEVICE_DATA()
         RETURNS STRING LANGUAGE SQL
@@ -180,10 +190,10 @@ class TestProcedureClassification:
         $$;
         """
         result = SQLAnalyzer.analyze_procedure("LOAD_DEVICE_DATA", ddl, [])
-        assert result["category"] != "Legacy"
+        assert result["is_legacy"] is False
 
     def test_legacy_no_false_match_bakery(self):
-        """_BAKERY should not trigger Legacy — _BAK requires a non-word boundary after it."""
+        """BAKERY should not trigger legacy — BAK requires a non-word boundary."""
         ddl = """
         CREATE OR REPLACE PROCEDURE PROCESS_BAKERY()
         RETURNS STRING LANGUAGE SQL
@@ -192,7 +202,7 @@ class TestProcedureClassification:
         $$;
         """
         result = SQLAnalyzer.analyze_procedure("PROCESS_BAKERY", ddl, [])
-        assert result["category"] != "Legacy"
+        assert result["is_legacy"] is False
 
     def test_unknown_no_ops_no_calls(self):
         ddl = """
@@ -414,17 +424,11 @@ class TestDependencyExtraction:
         assert "DW.TABLE_A" in read_names
         assert "DW.TABLE_B" in read_names
 
-    def test_js_comment_stripped(self):
-        ddl = """
-        AS $$
-        // INSERT INTO JUNK.COMMENTED SELECT 1;
-        INSERT INTO DW.REAL_TABLE SELECT * FROM DW.SOURCE;
-        $$
-        """
-        writes = SQLAnalyzer.extract_write_tables(ddl)
-        write_names = [w.upper() for w in writes]
-        assert "DW.REAL_TABLE" in write_names
-        assert "JUNK.COMMENTED" not in write_names
+    def test_double_slash_preserved_in_sql(self):
+        """// is NOT a SQL comment — _strip_comments should NOT remove it."""
+        body = "// this line stays\nINSERT INTO DW.T1 SELECT 1;"
+        cleaned = SQLAnalyzer._strip_comments(body)
+        assert "//" in cleaned
 
     def test_block_comment_spanning_lines(self):
         ddl = """
@@ -542,9 +546,10 @@ class TestViewClassification:
         assert result["category"] == "Materialized"
 
     def test_legacy_view(self):
-        ddl = "CREATE VIEW V_OLD AS SELECT * FROM JUNK.TEMP_DATA;"
-        result = SQLAnalyzer.analyze_view("V_OLD", ddl)
-        assert result["category"] == "Legacy"
+        ddl = "CREATE VIEW V_JUNK_OLD AS SELECT * FROM DW.TEMP_DATA;"
+        result = SQLAnalyzer.analyze_view("V_JUNK_OLD", ddl)
+        assert result["category"] == "Simple View"
+        assert result["is_legacy"] is True
 
     def test_view_sources_extraction(self):
         ddl = """
@@ -588,14 +593,15 @@ class TestViewClassification:
         result = SQLAnalyzer.analyze_view("V_AGG_JOIN", ddl)
         assert result["category"] == "Aggregation View"
 
-    def test_legacy_view_trumps_structure(self):
+    def test_legacy_view_preserves_structure(self):
         ddl = """
         CREATE VIEW V_DEV_JOIN AS
         SELECT a.id, b.name
         FROM DW_DEV.TABLE_A a JOIN DW_DEV.TABLE_B b ON a.id = b.id;
         """
         result = SQLAnalyzer.analyze_view("V_DEV_JOIN", ddl)
-        assert result["category"] == "Legacy"
+        assert result["category"] == "Join View"
+        assert result["is_legacy"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -611,7 +617,8 @@ class TestTableClassification:
 
     def test_legacy_table(self):
         result = SQLAnalyzer.analyze_table("OLD_BAK_DATA", "CREATE TABLE OLD_BAK_DATA (id INT);")
-        assert result["category"] == "Legacy"
+        assert result["category"] == "Table"
+        assert result["is_legacy"] is True
 
     def test_table_no_ddl(self):
         result = SQLAnalyzer.analyze_table("DIM_DATE")
@@ -620,7 +627,8 @@ class TestTableClassification:
 
     def test_legacy_table_by_name_only(self):
         result = SQLAnalyzer.analyze_table("JUNK_SCRATCH_DATA")
-        assert result["category"] == "Legacy"
+        assert result["category"] == "Table"
+        assert result["is_legacy"] is True
 
     def test_table_schema_propagated(self):
         result = SQLAnalyzer.analyze_table("MY_TABLE", "", schema_name="STAGING")
@@ -647,6 +655,329 @@ class TestUtilities:
 
     def test_hash_changes_on_edit(self):
         assert SQLAnalyzer._hash("SELECT 1;") != SQLAnalyzer._hash("SELECT 2;")
+
+
+# ---------------------------------------------------------------------------
+# Language detection
+# ---------------------------------------------------------------------------
+
+class TestLanguageDetection:
+
+    def test_detect_sql_explicit(self):
+        ddl = "CREATE PROCEDURE P() RETURNS STRING LANGUAGE SQL AS $$ SELECT 1; $$;"
+        assert SQLAnalyzer.detect_language(ddl) == "sql"
+
+    def test_detect_javascript(self):
+        ddl = "CREATE PROCEDURE P() RETURNS STRING LANGUAGE JAVASCRIPT AS $$ var x = 1; $$;"
+        assert SQLAnalyzer.detect_language(ddl) == "javascript"
+
+    def test_detect_snowflake_scripting_declare(self):
+        ddl = """
+        CREATE PROCEDURE P() RETURNS STRING LANGUAGE SQL
+        AS $$
+        DECLARE my_var INT;
+        BEGIN
+            my_var := 10;
+            INSERT INTO DW.T1 VALUES (my_var);
+        END;
+        $$;
+        """
+        assert SQLAnalyzer.detect_language(ddl) == "snowflake_scripting"
+
+    def test_detect_snowflake_scripting_execute_immediate(self):
+        ddl = """
+        CREATE PROCEDURE P() RETURNS STRING LANGUAGE SQL
+        AS $$
+        BEGIN
+            EXECUTE IMMEDIATE 'INSERT INTO DW.T1 VALUES (1)';
+        END;
+        $$;
+        """
+        assert SQLAnalyzer.detect_language(ddl) == "snowflake_scripting"
+
+    def test_detect_snowflake_scripting_let(self):
+        ddl = """
+        CREATE PROCEDURE P() RETURNS STRING LANGUAGE SQL
+        AS $$
+        BEGIN
+            LET x := 10;
+            INSERT INTO DW.T1 VALUES (x);
+        END;
+        $$;
+        """
+        assert SQLAnalyzer.detect_language(ddl) == "snowflake_scripting"
+
+    def test_detect_snowflake_scripting_resultset(self):
+        ddl = """
+        CREATE PROCEDURE P() RETURNS TABLE() LANGUAGE SQL
+        AS $$
+        DECLARE rs RESULTSET;
+        BEGIN
+            rs := (SELECT * FROM DW.T1);
+            RETURN TABLE(rs);
+        END;
+        $$;
+        """
+        assert SQLAnalyzer.detect_language(ddl) == "snowflake_scripting"
+
+    def test_detect_sql_no_language_clause(self):
+        ddl = "AS $$ INSERT INTO DW.T1 SELECT 1; $$"
+        assert SQLAnalyzer.detect_language(ddl) == "sql"
+
+    def test_detect_sql_begin_end_no_markers(self):
+        """BEGIN...END without scripting markers is still sql."""
+        ddl = """
+        AS $$
+        BEGIN
+            INSERT INTO DW.T1 SELECT 1;
+        END;
+        $$
+        """
+        assert SQLAnalyzer.detect_language(ddl) == "sql"
+
+
+# ---------------------------------------------------------------------------
+# JavaScript procedure support
+# ---------------------------------------------------------------------------
+
+class TestJavaScriptProcedures:
+
+    def test_js_procedure_extracts_tables(self):
+        ddl = """
+        CREATE OR REPLACE PROCEDURE JS_LOADER()
+        RETURNS STRING
+        LANGUAGE JAVASCRIPT
+        AS $$
+        var stmt = snowflake.createStatement({sqlText: "INSERT INTO DW.TARGET SELECT * FROM STAGING.SRC"});
+        stmt.execute();
+        $$;
+        """
+        result = SQLAnalyzer.analyze_procedure("JS_LOADER", ddl, [])
+        assert result["language"] == "javascript"
+        assert result["parse_method"] == "js_tokenizer"
+        assert "DW.TARGET" in result["target_tables"]
+        assert "STAGING.SRC" in result["dependencies"]
+
+    def test_js_procedure_multiple_statements(self):
+        ddl = """
+        CREATE OR REPLACE PROCEDURE JS_MULTI()
+        RETURNS STRING
+        LANGUAGE JAVASCRIPT
+        AS $$
+        var s1 = snowflake.createStatement({sqlText: "TRUNCATE TABLE DW.STAGING_TMP"});
+        s1.execute();
+        var s2 = snowflake.createStatement({sqlText: "INSERT INTO DW.STAGING_TMP SELECT * FROM SRC.DATA"});
+        s2.execute();
+        $$;
+        """
+        result = SQLAnalyzer.analyze_procedure("JS_MULTI", ddl, [])
+        assert "DW.STAGING_TMP" in result["target_tables"]
+
+    def test_js_procedure_single_quotes(self):
+        ddl = """
+        CREATE OR REPLACE PROCEDURE JS_SQ()
+        RETURNS STRING
+        LANGUAGE JAVASCRIPT
+        AS $$
+        var stmt = snowflake.createStatement({sqlText: 'INSERT INTO DW.T1 SELECT * FROM DW.SRC'});
+        stmt.execute();
+        $$;
+        """
+        result = SQLAnalyzer.analyze_procedure("JS_SQ", ddl, [])
+        assert "DW.T1" in result["target_tables"]
+
+    def test_js_procedure_backticks(self):
+        ddl = """
+        CREATE OR REPLACE PROCEDURE JS_BT()
+        RETURNS STRING
+        LANGUAGE JAVASCRIPT
+        AS $$
+        var stmt = snowflake.createStatement({sqlText: `INSERT INTO DW.T1 SELECT * FROM DW.SRC`});
+        stmt.execute();
+        $$;
+        """
+        result = SQLAnalyzer.analyze_procedure("JS_BT", ddl, [])
+        assert "DW.T1" in result["target_tables"]
+
+    def test_js_comment_not_extracted(self):
+        """// comments in JS bodies should be stripped before SQL extraction."""
+        ddl = """
+        CREATE OR REPLACE PROCEDURE JS_COMMENTED()
+        RETURNS STRING
+        LANGUAGE JAVASCRIPT
+        AS $$
+        // var old = snowflake.createStatement({sqlText: "INSERT INTO JUNK.OLD SELECT 1"});
+        var stmt = snowflake.createStatement({sqlText: "INSERT INTO DW.REAL SELECT 1"});
+        stmt.execute();
+        $$;
+        """
+        result = SQLAnalyzer.analyze_procedure("JS_COMMENTED", ddl, [])
+        assert "DW.REAL" in result["target_tables"]
+        assert "JUNK.OLD" not in result["target_tables"]
+
+    def test_js_dynamic_sql_detection(self):
+        ddl = """
+        CREATE OR REPLACE PROCEDURE JS_DYN()
+        RETURNS STRING
+        LANGUAGE JAVASCRIPT
+        AS $$
+        var tbl = "DW.TARGET";
+        var sql = "INSERT INTO " + tbl + " SELECT 1";
+        var stmt = snowflake.createStatement({sqlText: sql});
+        stmt.execute();
+        $$;
+        """
+        result = SQLAnalyzer.analyze_procedure("JS_DYN", ddl, [])
+        assert result["has_dynamic_sql"] is True
+
+
+# ---------------------------------------------------------------------------
+# Single-quote body extraction
+# ---------------------------------------------------------------------------
+
+class TestSingleQuoteBody:
+
+    def test_single_quote_body_extraction(self):
+        ddl = """
+        CREATE OR REPLACE PROCEDURE SQ_PROC()
+        RETURNS STRING
+        LANGUAGE SQL
+        AS 'INSERT INTO DW.T1 SELECT * FROM STAGING.SRC;'
+        """
+        result = SQLAnalyzer.analyze_procedure("SQ_PROC", ddl, [])
+        assert "DW.T1" in result["target_tables"]
+        assert "STAGING.SRC" in result["dependencies"]
+
+    def test_single_quote_body_with_escaped_quotes(self):
+        ddl = """
+        CREATE OR REPLACE PROCEDURE SQ_ESC()
+        RETURNS STRING
+        LANGUAGE SQL
+        AS 'INSERT INTO DW.T1 VALUES (''hello'', 1);'
+        """
+        body = SQLAnalyzer._extract_body_sql(ddl)
+        assert "hello" in body
+        assert "''" not in body
+
+    def test_single_quote_body_extraction_method(self):
+        ddl = "CREATE PROCEDURE P() RETURNS STRING AS 'SELECT 1;'"
+        body = SQLAnalyzer._extract_body_sql(ddl)
+        assert body == "SELECT 1;"
+
+
+# ---------------------------------------------------------------------------
+# EXECUTE IMMEDIATE / dynamic SQL
+# ---------------------------------------------------------------------------
+
+class TestExecuteImmediate:
+
+    def test_execute_immediate_flags_dynamic_sql(self):
+        ddl = """
+        CREATE OR REPLACE PROCEDURE DYN_SQL()
+        RETURNS STRING LANGUAGE SQL
+        AS $$
+        DECLARE sql_str STRING;
+        BEGIN
+            sql_str := 'INSERT INTO DW.T1 SELECT 1';
+            EXECUTE IMMEDIATE sql_str;
+        END;
+        $$;
+        """
+        result = SQLAnalyzer.analyze_procedure("DYN_SQL", ddl, [])
+        assert result["has_dynamic_sql"] is True
+        assert result["language"] == "snowflake_scripting"
+
+    def test_no_dynamic_sql_by_default(self):
+        ddl = """
+        CREATE OR REPLACE PROCEDURE STATIC_SQL()
+        RETURNS STRING LANGUAGE SQL
+        AS $$ INSERT INTO DW.T1 SELECT 1; $$;
+        """
+        result = SQLAnalyzer.analyze_procedure("STATIC_SQL", ddl, [])
+        assert result["has_dynamic_sql"] is False
+
+
+# ---------------------------------------------------------------------------
+# MERGE double-counting fix
+# ---------------------------------------------------------------------------
+
+class TestMergeCount:
+
+    def test_merge_counted_once(self):
+        body = """
+        MERGE INTO DW.TARGET tgt
+        USING STAGING.SRC src ON tgt.id = src.id
+        WHEN MATCHED THEN UPDATE SET tgt.name = src.name
+        WHEN NOT MATCHED THEN INSERT (id, name) VALUES (src.id, src.name);
+        """
+        count = SQLAnalyzer._count_sql_ops(body)
+        assert count == 1
+
+    def test_merge_plus_separate_insert(self):
+        body = """
+        MERGE INTO DW.TARGET tgt
+        USING STAGING.SRC src ON tgt.id = src.id
+        WHEN MATCHED THEN UPDATE SET tgt.name = src.name
+        WHEN NOT MATCHED THEN INSERT (id, name) VALUES (src.id, src.name);
+        INSERT INTO DW.LOG SELECT 'merge done';
+        """
+        count = SQLAnalyzer._count_sql_ops(body)
+        assert count == 2
+
+
+# ---------------------------------------------------------------------------
+# Legacy flag (Phase 2)
+# ---------------------------------------------------------------------------
+
+class TestLegacyFlag:
+
+    def test_check_legacy_matches_name(self):
+        is_legacy, reason = SQLAnalyzer.check_legacy("JUNK_LOADER", "DW")
+        assert is_legacy is True
+        assert "JUNK" in reason
+
+    def test_check_legacy_matches_schema(self):
+        is_legacy, reason = SQLAnalyzer.check_legacy("NORMAL_PROC", "DW_DEV")
+        assert is_legacy is True
+        assert "DEV" in reason
+
+    def test_check_legacy_no_match(self):
+        is_legacy, reason = SQLAnalyzer.check_legacy("NORMAL_PROC", "DW")
+        assert is_legacy is False
+        assert reason == ""
+
+    def test_check_legacy_name_only(self):
+        is_legacy, reason = SQLAnalyzer.check_legacy("DEV_SCRATCH", "")
+        assert is_legacy is True
+        assert "DEV" in reason
+
+    def test_check_legacy_multiple_patterns(self):
+        is_legacy, reason = SQLAnalyzer.check_legacy("JUNK_LOADER", "DW_BAK")
+        assert is_legacy is True
+        assert "JUNK" in reason
+        assert "BAK" in reason
+
+    def test_configurable_legacy_patterns(self):
+        original = SQLAnalyzer.LEGACY_PATTERNS
+        try:
+            SQLAnalyzer.LEGACY_PATTERNS = [
+                (r'(?<![a-zA-Z0-9])DEPRECATED(?![a-zA-Z0-9])', "Deprecated marker"),
+            ]
+            is_legacy, reason = SQLAnalyzer.check_legacy("DEPRECATED_PROC", "DW")
+            assert is_legacy is True
+            assert "Deprecated" in reason
+
+            is_legacy, _ = SQLAnalyzer.check_legacy("JUNK_LOADER", "DW")
+            assert is_legacy is False
+        finally:
+            SQLAnalyzer.LEGACY_PATTERNS = original
+
+    def test_legacy_false_positive_guards(self):
+        """DEVICE, BAKERY should not trigger legacy."""
+        is_legacy, _ = SQLAnalyzer.check_legacy("LOAD_DEVICE_DATA", "DW")
+        assert is_legacy is False
+        is_legacy, _ = SQLAnalyzer.check_legacy("PROCESS_BAKERY", "STAGING")
+        assert is_legacy is False
 
 
 if __name__ == "__main__":

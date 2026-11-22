@@ -8,6 +8,7 @@ from pydantic import BaseModel
 import json
 
 from backend.database import get_db
+from collections import defaultdict, deque
 from backend.models import SourceObject, MigrationState, VirtualNode, ChangeLog
 
 
@@ -28,6 +29,12 @@ class ObjectResponse(BaseModel):
     migration_status: str
     is_virtual: bool = False
     parent_name: Optional[str] = None
+    language: Optional[str] = None
+    has_dynamic_sql: bool = False
+    parse_method: Optional[str] = None
+    is_legacy: bool = False
+    legacy_reason: Optional[str] = None
+    references_legacy: bool = False
 
     class Config:
         from_attributes = True
@@ -77,6 +84,12 @@ def _obj_to_dict(obj: SourceObject, status_val: str, include_deps: bool = False)
         "migration_status": status_val,
         "is_virtual": False,
         "parent_name": None,
+        "language": obj.language,
+        "has_dynamic_sql": obj.has_dynamic_sql or False,
+        "parse_method": obj.parse_method,
+        "is_legacy": obj.is_legacy or False,
+        "legacy_reason": obj.legacy_reason or "",
+        "references_legacy": obj.references_legacy or False,
     }
     if include_deps:
         d["ddl"] = obj.ddl or ""
@@ -144,6 +157,12 @@ async def list_objects(
             "migration_status": vn_status,
             "is_virtual": True,
             "parent_name": parent.name,
+            "language": parent.language,
+            "has_dynamic_sql": parent.has_dynamic_sql or False,
+            "parse_method": parent.parse_method,
+            "is_legacy": parent.is_legacy or False,
+            "legacy_reason": parent.legacy_reason or "",
+            "references_legacy": parent.references_legacy or False,
         })
 
     return items
@@ -290,6 +309,96 @@ async def get_clusters(db: Session = Depends(get_db)):
         clusters[primary].append(obj.name)
 
     return clusters
+
+
+@router.get("/waves")
+async def get_migration_waves(db: Session = Depends(get_db)):
+    """Topological sort into migration waves using Kahn's algorithm."""
+    hidden_ids = {s.source_object_id for s in db.query(MigrationState).filter(MigrationState.is_hidden == True).all()}
+    objects = [o for o in db.query(SourceObject).all() if o.id not in hidden_ids]
+    name_map = {o.name.upper(): o.name for o in objects}
+    all_names = set(name_map.values())
+
+    adj: dict = defaultdict(set)
+    in_degree: dict = {n: 0 for n in all_names}
+
+    for obj in objects:
+        src = obj.name
+        for callee in _json_load(obj.calls):
+            tgt = name_map.get(callee.split(".")[-1].strip('"').upper())
+            if tgt and tgt != src:
+                if src not in adj[tgt]:
+                    adj[tgt].add(src)
+                    in_degree[src] = in_degree.get(src, 0) + 1
+        for tgt_name in _json_load(obj.target_tables):
+            tgt = name_map.get(tgt_name.split(".")[-1].strip('"').upper())
+            if tgt and tgt != src:
+                if src not in adj[tgt]:
+                    adj[tgt].add(src)
+                    in_degree[src] = in_degree.get(src, 0) + 1
+
+    queue = deque(n for n in all_names if in_degree[n] == 0)
+    waves = []
+    visited = set()
+
+    while queue:
+        wave = sorted(queue)
+        waves.append(wave)
+        next_queue = deque()
+        for node in wave:
+            visited.add(node)
+            for neighbor in sorted(adj.get(node, [])):
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    next_queue.append(neighbor)
+        queue = next_queue
+
+    cycle_members = sorted(n for n in all_names if n not in visited)
+
+    obj_map = {o.name: o for o in objects}
+    statuses = {s.source_object_id: s.status for s in db.query(MigrationState).all()}
+
+    wave_data = []
+    for i, wave in enumerate(waves):
+        items = []
+        for name in wave:
+            o = obj_map.get(name)
+            if o:
+                items.append({
+                    "name": o.name,
+                    "object_type": o.object_type,
+                    "category": o.category,
+                    "migration_status": statuses.get(o.id, "Not Started"),
+                })
+        wave_data.append({"wave": i, "objects": items})
+
+    return {"waves": wave_data, "cycles": cycle_members}
+
+
+@router.get("/objects/{name}/history")
+async def get_object_history(name: str, db: Session = Depends(get_db)):
+    """Return ChangeLog entries for a named object."""
+    obj = db.query(SourceObject).filter(SourceObject.name == name).first()
+    if not obj:
+        raise HTTPException(status_code=404, detail="Object not found")
+
+    logs = (
+        db.query(ChangeLog)
+        .filter(ChangeLog.entity_type == "source_object", ChangeLog.entity_id == obj.id)
+        .order_by(ChangeLog.id.desc())
+        .all()
+    )
+    return [
+        {
+            "id": log.id,
+            "action": log.action,
+            "old_state": log.old_state,
+            "new_state": log.new_state,
+            "user": log.user,
+            "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+        }
+        for log in logs
+    ]
 
 
 # Keep backward compat — /api/sps redirects to /api/objects?object_type=procedure

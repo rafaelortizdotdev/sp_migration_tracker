@@ -173,7 +173,6 @@
         .badge-hybrid { background: var(--orange); color: #431407; }
         .badge-utility { background: var(--cyan); color: #083344; }
         .badge-etl-control { background: var(--indigo); color: #1e1b4b; }
-        .badge-legacy { background: var(--stone); color: #1c1917; }
         .badge-unknown { background: var(--surface2); color: var(--text-muted); }
         .badge-table { background: #64748b; color: #0f172a; }
         .badge-simple-view { background: #38bdf8; color: #0c4a6e; }
@@ -194,6 +193,32 @@
         .type-procedure { background: #1e3a5f; color: #60a5fa; }
         .type-view { background: #1a3a2a; color: #34d399; }
         .type-table { background: #2d2215; color: #fbbf24; }
+
+        .lang-badge {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-left: 4px;
+        }
+        .lang-sql { background: #1e3a5f; color: #60a5fa; }
+        .lang-javascript { background: #422006; color: #fbbf24; }
+        .lang-snowflake_scripting { background: #3b0764; color: #c084fc; }
+
+        .flag-badge {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: 600;
+            margin-left: 4px;
+        }
+        .flag-legacy { background: #78350f; color: #fbbf24; border: 1px solid #92400e; }
+        .flag-refs-legacy { background: #1c1917; color: #a8a29e; border: 1px solid #44403c; }
+        .flag-dynamic { background: #450a0a; color: #fca5a5; border: 1px solid #7f1d1d; }
 
         /* Status select */
         .status-select {
@@ -363,6 +388,112 @@
             border-bottom: 1px solid var(--surface2);
         }
 
+        /* Split controls */
+        .modal-actions {
+            padding: 12px 20px;
+            border-bottom: 1px solid var(--surface2);
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .btn-action {
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            border: 1px solid var(--border);
+            transition: all 0.15s;
+        }
+        .btn-split { background: var(--orange); color: #431407; border-color: var(--orange); }
+        .btn-split:hover { filter: brightness(1.1); }
+        .btn-unsplit { background: var(--surface2); color: var(--text); }
+        .btn-unsplit:hover { background: var(--border); }
+
+        /* History panel */
+        .history-panel {
+            border-top: 1px solid var(--surface2);
+            max-height: 180px;
+            overflow-y: auto;
+        }
+        .history-panel h4 {
+            padding: 10px 20px 6px;
+            font-size: 12px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .history-entry {
+            padding: 6px 20px;
+            font-size: 12px;
+            display: flex;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--surface2);
+        }
+        .history-entry:last-child { border-bottom: none; }
+        .history-action { font-weight: 600; }
+        .history-time { color: var(--text-muted); }
+
+        /* Wave cards */
+        .wave-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 12px;
+        }
+        .wave-card h4 {
+            font-size: 14px;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .wave-num {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 28px;
+            height: 28px;
+            background: var(--accent);
+            color: white;
+            border-radius: 50%;
+            font-size: 13px;
+            font-weight: 700;
+        }
+        .wave-items {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .wave-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .wave-item:hover { border-color: var(--accent); color: var(--accent); }
+        .wave-status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+        }
+        .cycle-warn {
+            background: #451a03;
+            border: 1px solid var(--orange);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 12px;
+            color: var(--orange);
+            font-size: 13px;
+        }
+
         @media (max-width: 768px) {
             .header { padding: 12px 16px; }
             .tabs { padding: 0 16px; }
@@ -386,6 +517,7 @@
 
 <div class="tabs">
     <div class="tab active" data-tab="inventory">Full Inventory</div>
+    <div class="tab" data-tab="waves">Migration Order</div>
     <div class="tab" data-tab="pipelines">DAG Pipelines</div>
     <div class="tab" data-tab="graph">Call Graph</div>
 </div>
@@ -417,6 +549,8 @@
                 <th data-sort="name">Name</th>
                 <th data-sort="object_type">Type</th>
                 <th data-sort="category">Category</th>
+                <th data-sort="language">Lang</th>
+                <th>Flags</th>
                 <th>Targets</th>
                 <th data-sort="loc">LOC</th>
                 <th>Status</th>
@@ -425,6 +559,17 @@
         </thead>
         <tbody id="inventoryBody"></tbody>
     </table>
+</div>
+
+<!-- Migration Order Tab -->
+<div class="tab-content" id="tab-waves">
+    <div class="section-title">Migration Waves (Topological Order)</div>
+    <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px">
+        Objects with no dependencies migrate first (Wave 0). Each subsequent wave
+        depends only on objects in earlier waves. Objects within the same wave can
+        migrate in parallel.
+    </p>
+    <div id="wavesContainer"></div>
 </div>
 
 <!-- Pipelines Tab -->
@@ -458,8 +603,13 @@
             <button class="modal-close" id="modalClose">&times;</button>
         </div>
         <div class="modal-meta" id="modalMeta"></div>
+        <div class="modal-actions" id="modalActions" style="display:none"></div>
         <div class="modal-body">
             <pre><code class="language-sql" id="modalCode"></code></pre>
+        </div>
+        <div class="history-panel" id="historyPanel">
+            <h4>Change History</h4>
+            <div id="historyEntries"></div>
         </div>
     </div>
 </div>
@@ -486,7 +636,6 @@ const CAT_COLORS = {
     'Hybrid': '#fb923c',
     'Utility': '#22d3ee',
     'ETL Control': '#818cf8',
-    'Legacy': '#a8a29e',
     'Unknown': '#475569',
     'Table': '#64748b',
     'Simple View': '#38bdf8',
@@ -511,17 +660,18 @@ let _graphData = null;
 let _graphInitialized = false;
 
 async function init() {
-    let objects, stats, edges, clusters;
+    let objects, stats, edges, clusters, waves;
     try {
-        [objects, stats, edges, clusters] = await Promise.all([
+        [objects, stats, edges, clusters, waves] = await Promise.all([
             fetchJSON(`${API}/objects`),
             fetchJSON(`${API}/stats`),
             fetchJSON(`${API}/edges`),
             fetchJSON(`${API}/clusters`),
+            fetchJSON(`${API}/waves`),
         ]);
     } catch (err) {
         document.getElementById('inventoryBody').innerHTML =
-            `<tr><td colspan="7" style="color:var(--red);padding:24px;text-align:center">
+            `<tr><td colspan="9" style="color:var(--red);padding:24px;text-align:center">
             Failed to load data: ${err.message}</td></tr>`;
         return;
     }
@@ -531,6 +681,7 @@ async function init() {
     populateCategoryFilter(stats);
     renderInventory();
     try { renderPipelines(objects, edges, clusters); } catch(e) { console.error('Pipelines:', e); }
+    try { renderWaves(waves); } catch(e) { console.error('Waves:', e); }
     _graphData = { objects, edges, clusters };
 }
 
@@ -602,11 +753,18 @@ function renderInventory() {
     document.getElementById('filterCount').textContent = `${filtered.length} of ${allObjects.length}`;
 
     const tbody = document.getElementById('inventoryBody');
-    tbody.innerHTML = filtered.map(o => `
-        <tr>
+    tbody.innerHTML = filtered.map(o => {
+        const flags = [];
+        if (o.is_legacy) flags.push(`<span class="flag-badge flag-legacy" title="${esc(o.legacy_reason||'')}">Legacy</span>`);
+        if (o.references_legacy) flags.push('<span class="flag-badge flag-refs-legacy">Refs Legacy</span>');
+        if (o.has_dynamic_sql) flags.push('<span class="flag-badge flag-dynamic">Dynamic SQL</span>');
+        const langHtml = o.language ? `<span class="lang-badge lang-${o.language}">${langLabel(o.language)}</span>` : '-';
+        return `<tr>
             <td style="font-weight:500">${esc(o.name)}</td>
             <td><span class="${typeBadgeClass(o.object_type)}">${o.object_type}</span></td>
             <td><span class="${catBadgeClass(o.category)}">${esc(o.category)}</span></td>
+            <td>${langHtml}</td>
+            <td>${flags.join(' ') || '-'}</td>
             <td style="font-size:11px;color:var(--text-muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
                 title="${esc((o.target_tables||[]).join(', '))}">${(o.target_tables||[]).join(', ') || '-'}</td>
             <td>${o.loc}</td>
@@ -618,11 +776,12 @@ function renderInventory() {
                 </select>
             </td>
             <td><button class="btn-view" onclick="viewCode('${esc(o.name)}')">View</button></td>
-        </tr>
-    `).join('');
+        </tr>`;
+    }).join('');
 }
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML.replace(/'/g,'&#39;').replace(/"/g,'&quot;'); }
+function langLabel(l) { return l === 'snowflake_scripting' ? 'SF Script' : l === 'javascript' ? 'JS' : (l || '').toUpperCase(); }
 
 // ---- Sort ----
 document.querySelectorAll('.inv-table th[data-sort]').forEach(th => {
@@ -665,24 +824,92 @@ async function updateStatus(sel) {
 // ---- Code Viewer ----
 async function viewCode(name) {
     try {
-        const data = await fetchJSON(`${API}/objects/${encodeURIComponent(name)}`);
+        const [data, history] = await Promise.all([
+            fetchJSON(`${API}/objects/${encodeURIComponent(name)}`),
+            fetchJSON(`${API}/objects/${encodeURIComponent(name)}/history`).catch(() => []),
+        ]);
         document.getElementById('modalTitle').textContent = data.name;
+
+        const flags = [];
+        if (data.language) flags.push(`<span class="lang-badge lang-${data.language}">${langLabel(data.language)}</span>`);
+        if (data.is_legacy) flags.push(`<span class="flag-badge flag-legacy" title="${esc(data.legacy_reason||'')}">${esc(data.legacy_reason||'Legacy')}</span>`);
+        if (data.references_legacy) flags.push('<span class="flag-badge flag-refs-legacy">References Legacy</span>');
+        if (data.has_dynamic_sql) flags.push('<span class="flag-badge flag-dynamic">Dynamic SQL</span>');
+
         document.getElementById('modalMeta').innerHTML = `
             <span>Type: <strong>${esc(data.object_type)}</strong></span>
             <span>Category: <strong>${esc(data.category)}</strong></span>
+            ${data.parse_method ? `<span>Parse: <strong>${esc(data.parse_method)}</strong></span>` : ''}
             <span>LOC: <strong>${data.loc}</strong></span>
             <span>Targets: <strong>${esc((data.target_tables||[]).join(', ')||'none')}</strong></span>
             <span>Deps: <strong>${esc((data.dependencies||[]).join(', ')||'none')}</strong></span>
+            ${flags.length ? '<span>' + flags.join(' ') + '</span>' : ''}
         `;
+
+        const actionsEl = document.getElementById('modalActions');
+        if (data.category === 'Hybrid' && !data.is_virtual) {
+            actionsEl.style.display = 'flex';
+            actionsEl.innerHTML = `
+                <button class="btn-action btn-split" onclick="splitObject('${esc(data.name)}')">Split into ORCH + LOGIC</button>
+            `;
+        } else if (data.is_virtual && data.parent_name) {
+            actionsEl.style.display = 'flex';
+            actionsEl.innerHTML = `
+                <span style="font-size:12px;color:var(--text-muted)">Virtual node from ${esc(data.parent_name)}</span>
+                <button class="btn-action btn-unsplit" onclick="unsplitObject('${esc(data.parent_name)}')">Unsplit (restore parent)</button>
+            `;
+        } else {
+            actionsEl.style.display = 'none';
+        }
+
         const codeEl = document.getElementById('modalCode');
         codeEl.textContent = data.ddl || '-- No DDL available';
         delete codeEl.dataset.highlighted;
-        codeEl.className = 'language-sql';
+        codeEl.className = data.language === 'javascript' ? 'language-javascript' : 'language-sql';
         hljs.highlightElement(codeEl);
+
+        const histEl = document.getElementById('historyEntries');
+        if (history.length) {
+            histEl.innerHTML = history.map(h => `
+                <div class="history-entry">
+                    <span><span class="history-action">${esc(h.action)}</span> ${h.old_state ? esc(h.old_state) + ' → ' : ''}${esc(h.new_state||'')}</span>
+                    <span class="history-time">${h.user ? esc(h.user) + ' · ' : ''}${h.timestamp ? new Date(h.timestamp).toLocaleString() : ''}</span>
+                </div>
+            `).join('');
+            document.getElementById('historyPanel').style.display = 'block';
+        } else {
+            histEl.innerHTML = '<div class="history-entry" style="color:var(--text-muted)">No changes recorded</div>';
+            document.getElementById('historyPanel').style.display = 'block';
+        }
+
         document.getElementById('codeModal').classList.add('open');
     } catch (err) {
         alert(`Failed to load DDL: ${err.message}`);
     }
+}
+
+async function splitObject(name) {
+    if (!confirm(`Split ${name} into ORCH + LOGIC virtual nodes?`)) return;
+    try {
+        const r = await fetch(`${API}/nodes/${encodeURIComponent(name)}/split`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({user: 'dashboard'}),
+        });
+        if (!r.ok) { const e = await r.json().catch(() => ({})); alert(e.detail || 'Split failed'); return; }
+        document.getElementById('codeModal').classList.remove('open');
+        await init();
+    } catch (err) { alert(`Split error: ${err.message}`); }
+}
+
+async function unsplitObject(parentName) {
+    if (!confirm(`Unsplit ${parentName}? This removes the virtual nodes.`)) return;
+    try {
+        const r = await fetch(`${API}/nodes/${encodeURIComponent(parentName)}/unsplit`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({user: 'dashboard'}),
+        });
+        if (!r.ok) { const e = await r.json().catch(() => ({})); alert(e.detail || 'Unsplit failed'); return; }
+        document.getElementById('codeModal').classList.remove('open');
+        await init();
+    } catch (err) { alert(`Unsplit error: ${err.message}`); }
 }
 document.getElementById('modalClose').addEventListener('click', () => {
     document.getElementById('codeModal').classList.remove('open');
@@ -748,6 +975,40 @@ function renderPipelines(objects, edges, clusters) {
             </div>`;
         }).join('');
     }
+}
+
+// ---- Migration Waves ----
+function renderWaves(data) {
+    const container = document.getElementById('wavesContainer');
+    let html = '';
+
+    if (data.cycles && data.cycles.length > 0) {
+        html += `<div class="cycle-warn">
+            <strong>Circular dependencies detected (${data.cycles.length} objects):</strong>
+            ${data.cycles.map(n => `<span class="pipeline-node" onclick="viewCode('${esc(n)}')">${esc(n)}</span>`).join(' ')}
+            <p style="margin-top:8px;font-size:12px;">These objects form dependency cycles and cannot be ordered into waves. Break the cycle to include them.</p>
+        </div>`;
+    }
+
+    for (const wave of (data.waves || [])) {
+        if (wave.objects.length === 0) continue;
+        html += `<div class="wave-card">
+            <h4><span class="wave-num">${wave.wave}</span> Wave ${wave.wave}
+                <span style="font-weight:400;color:var(--text-muted);font-size:12px">${wave.objects.length} objects</span></h4>
+            <div class="wave-items">
+                ${wave.objects.map(o => `
+                    <span class="wave-item" onclick="viewCode('${esc(o.name)}')">
+                        <span class="wave-status-dot" style="background:${STATUS_COLORS[o.migration_status]||'#475569'}"></span>
+                        <span class="${typeBadgeClass(o.object_type)}">${o.object_type[0].toUpperCase()}</span>
+                        ${esc(o.name)}
+                    </span>
+                `).join('')}
+            </div>
+        </div>`;
+    }
+
+    if (!html) html = '<p style="color:var(--text-muted);font-size:13px;">No objects loaded.</p>';
+    container.innerHTML = html;
 }
 
 // ---- Call Graph (D3) ----

@@ -28,24 +28,53 @@ class SQLAnalyzer:
         except Exception:
             return []
 
+    @classmethod
+    def detect_language(cls, ddl: str) -> str:
+        """Detect procedure language: 'sql', 'javascript', or 'snowflake_scripting'."""
+        if re.search(r'\bLANGUAGE\s+JAVASCRIPT\b', ddl, re.IGNORECASE):
+            return "javascript"
+        body = cls._extract_body_sql(ddl)
+        scripting_keywords = (
+            r'\bEXECUTE\s+IMMEDIATE\b',
+            r'\bRESULTSET\b',
+            r'\bLET\s+\w+',
+        )
+        has_declare = bool(re.search(r'\bDECLARE\b', body, re.IGNORECASE))
+        has_begin = bool(re.search(r'\bBEGIN\b', body, re.IGNORECASE))
+        has_scripting_kw = any(re.search(p, body, re.IGNORECASE) for p in scripting_keywords)
+        if (has_declare and has_begin) or has_scripting_kw:
+            return "snowflake_scripting"
+        return "sql"
+
     @staticmethod
     def _extract_body_sql(ddl: str) -> str:
-        """For stored procedures, extract the SQL body from the AS $$ ... $$ block."""
-        match = re.search(
-            r"AS\s*\$\$(.+?)\$\$",
-            ddl,
-            re.DOTALL | re.IGNORECASE,
-        )
-        return match.group(1).strip() if match else ddl
+        """Extract the procedure body from AS $$ ... $$ or AS '...' blocks."""
+        match = re.search(r"AS\s*\$\$(.+?)\$\$", ddl, re.DOTALL | re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        match = re.search(r"AS\s*'((?:[^']|'')*)'", ddl, re.DOTALL | re.IGNORECASE)
+        if match:
+            return match.group(1).replace("''", "'").strip()
+        return ddl
 
     @staticmethod
     def _strip_comments(sql: str) -> str:
-        """Remove SQL single-line and block comments."""
+        """Remove SQL comments (-- and /* */).  Does NOT strip // — that is JS only."""
         sql = re.sub(r'--[^\n]*', '', sql)
         sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)
-        # Snowflake JS-style comments inside $$ bodies
-        sql = re.sub(r'//[^\n]*', '', sql)
         return sql
+
+    @staticmethod
+    def _extract_js_sql_strings(body: str) -> List[str]:
+        """Extract SQL from JavaScript procedure bodies (sqlText: values)."""
+        sqls: List[str] = []
+        for m in re.finditer(r'sqlText\s*:\s*"((?:[^"\\]|\\.)*)"', body, re.DOTALL):
+            sqls.append(m.group(1))
+        for m in re.finditer(r"sqlText\s*:\s*'((?:[^'\\]|\\.)*)'", body, re.DOTALL):
+            sqls.append(m.group(1))
+        for m in re.finditer(r'sqlText\s*:\s*`((?:[^`\\]|\\.)*)`', body, re.DOTALL):
+            sqls.append(m.group(1))
+        return sqls
 
     @staticmethod
     def _collect_cte_names(stmts: List[exp.Expression]) -> Set[str]:
@@ -191,13 +220,31 @@ class SQLAnalyzer:
 
     CATEGORIES = [
         "Scheduler", "Orchestrator", "Transformation", "Hybrid",
-        "Utility", "ETL Control", "Legacy", "Unknown",
+        "Utility", "ETL Control", "Unknown",
     ]
 
     VIEW_CATEGORIES = [
         "Simple View", "Aggregation View", "Join View", "Nested View",
-        "Materialized", "Legacy", "Unknown",
+        "Materialized", "Unknown",
     ]
+
+    LEGACY_PATTERNS = [
+        (r'(?<![a-zA-Z0-9])DEV(?![a-zA-Z0-9])', "DEV schema reference"),
+        (r'(?<![a-zA-Z0-9])BAK(?![a-zA-Z0-9])', "BAK schema reference"),
+        (r'(?<![a-zA-Z0-9])JUNK(?![a-zA-Z0-9])', "JUNK schema reference"),
+    ]
+
+    @classmethod
+    def check_legacy(cls, name: str, schema_name: str) -> Tuple[bool, str]:
+        """Check if an object is legacy based on its name and schema."""
+        text = f"{name} {schema_name or ''}"
+        reasons = []
+        for pattern, label in cls.LEGACY_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE):
+                reasons.append(label)
+        if reasons:
+            return True, "; ".join(reasons)
+        return False, ""
 
     @classmethod
     def classify_procedure(
@@ -212,14 +259,11 @@ class SQLAnalyzer:
         sql_ops = cls._count_sql_ops(body)
 
         has_control = bool(re.search(r'\bCONTROL\b|\bETL_|\bBATCH_ID|\bJOB_ID', body, re.IGNORECASE))
-        has_legacy = bool(re.search(r'(?<![a-zA-Z0-9])(?:DEV|BAK|JUNK)(?![a-zA-Z0-9])', ddl or name or "", re.IGNORECASE))
         has_scheduler_kw = bool(re.search(r'REFRESH|BATCH|DAILY|SYNC|LOAD_ALL|SCHEDULER', name, re.IGNORECASE))
 
         is_root = call_count > 0 and called_by_count == 0
         is_utility = called_by_count >= 2 and call_count == 0
 
-        if has_legacy:
-            return "Legacy", "Contains DEV/BAK/JUNK schema references"
         if has_control and (has_scheduler_kw or is_root):
             return "ETL Control", "Manages job state, batch IDs, or scheduling"
         if is_root and has_scheduler_kw:
@@ -241,10 +285,7 @@ class SQLAnalyzer:
     def classify_view(cls, name: str, ddl: str, dep_count: int) -> Tuple[str, str]:
         """Classify a view based on its query structure."""
         is_mat = bool(re.search(r'\bMATERIALIZED\b', ddl, re.IGNORECASE))
-        has_legacy = bool(re.search(r'(?<![a-zA-Z0-9])(?:DEV|BAK|JUNK)(?![a-zA-Z0-9])', ddl or name or "", re.IGNORECASE))
 
-        if has_legacy:
-            return "Legacy", "References DEV/BAK/JUNK schemas"
         if is_mat:
             return "Materialized", "Materialized view"
 
@@ -272,9 +313,6 @@ class SQLAnalyzer:
     @classmethod
     def classify_table(cls, name: str, ddl: str) -> Tuple[str, str]:
         """Classify a table as a dependency node — always 'Table'."""
-        has_legacy = bool(re.search(r'(?<![a-zA-Z0-9])(?:DEV|BAK|JUNK)(?![a-zA-Z0-9])', ddl or name or "", re.IGNORECASE))
-        if has_legacy:
-            return "Legacy", "Table in DEV/BAK/JUNK schema"
         return "Table", "Data table (dependency node)"
 
     # -------------------------------------------------------------------
@@ -290,8 +328,66 @@ class SQLAnalyzer:
         called_by_count: int = 0,
         schema_name: str = "",
     ) -> Dict:
+        language = cls.detect_language(ddl)
+        has_dynamic_sql = bool(re.search(r'\bEXECUTE\s+IMMEDIATE\b', ddl, re.IGNORECASE))
+
+        if language == "javascript":
+            body_raw = cls._extract_body_sql(ddl)
+            body_clean = re.sub(r'//[^\n]*', '', body_raw)
+            body_clean = re.sub(r'/\*.*?\*/', '', body_clean, flags=re.DOTALL)
+            body_clean = re.sub(r'--[^\n]*', '', body_clean)
+            sql_strings = cls._extract_js_sql_strings(body_clean)
+            effective_sql = ";\n".join(sql_strings)
+
+            stmts = cls._safe_parse(effective_sql)
+            cte_names = cls._collect_cte_names(stmts)
+            read_tables: Set[str] = set()
+            write_tables: Set[str] = set()
+
+            for stmt in stmts:
+                if stmt is None:
+                    continue
+                for table in stmt.find_all(exp.Table):
+                    n = cls._normalize_table(table)
+                    if n and n.split(".")[-1] not in cte_names:
+                        read_tables.add(n)
+                for node in stmt.find_all(exp.Insert, exp.Merge, exp.Update,
+                                          exp.Delete, exp.Drop, exp.TruncateTable):
+                    tgt = node.find(exp.Table)
+                    if tgt:
+                        n = cls._normalize_table(tgt)
+                        if n:
+                            write_tables.add(n)
+                for cmd in stmt.find_all(exp.Command):
+                    if cmd.this and cmd.this.upper() == "TRUNCATE":
+                        tgt = cmd.find(exp.Table)
+                        if tgt:
+                            n = cls._normalize_table(tgt)
+                            if n:
+                                write_tables.add(n)
+
+            parse_method = "js_tokenizer"
+            if not read_tables and not write_tables and effective_sql.strip():
+                write_tables = cls._regex_extract_targets(effective_sql)
+                read_tables = cls._regex_extract_dependencies(effective_sql)
+                parse_method = "regex"
+
+            target_tables = sorted(write_tables)
+            dependencies = sorted(read_tables - write_tables)
+
+            if re.search(r'sqlText\s*:\s*[a-zA-Z_]', body_clean):
+                has_dynamic_sql = True
+        else:
+            target_tables = cls.extract_write_tables(ddl)
+            dependencies = cls.extract_read_tables(ddl)
+            body = cls._strip_comments(cls._extract_body_sql(ddl))
+            stmts = cls._safe_parse(body)
+            parse_method = "ast" if any(s is not None for s in stmts) else "regex"
+
         calls = cls.extract_calls(ddl, all_names)
         category, reason = cls.classify_procedure(name, ddl, len(calls), called_by_count)
+        is_legacy, legacy_reason = cls.check_legacy(name, schema_name)
+
         return {
             "name": name,
             "object_type": "procedure",
@@ -302,9 +398,15 @@ class SQLAnalyzer:
             "loc": cls._count_loc(ddl),
             "calls": calls,
             "called_by": called_by_count,
-            "target_tables": cls.extract_write_tables(ddl),
-            "dependencies": cls.extract_read_tables(ddl),
+            "target_tables": target_tables,
+            "dependencies": dependencies,
             "source_hash": cls._hash(ddl),
+            "language": language,
+            "has_dynamic_sql": has_dynamic_sql,
+            "parse_method": parse_method,
+            "is_legacy": is_legacy,
+            "legacy_reason": legacy_reason,
+            "references_legacy": False,
         }
 
     @classmethod
@@ -316,6 +418,7 @@ class SQLAnalyzer:
     ) -> Dict:
         deps = cls.extract_view_sources(ddl)
         category, reason = cls.classify_view(name, ddl, len(deps))
+        is_legacy, legacy_reason = cls.check_legacy(name, schema_name)
         return {
             "name": name,
             "object_type": "view",
@@ -329,6 +432,12 @@ class SQLAnalyzer:
             "target_tables": [],
             "dependencies": deps,
             "source_hash": cls._hash(ddl),
+            "language": "sql",
+            "has_dynamic_sql": False,
+            "parse_method": "ast",
+            "is_legacy": is_legacy,
+            "legacy_reason": legacy_reason,
+            "references_legacy": False,
         }
 
     @classmethod
@@ -339,6 +448,7 @@ class SQLAnalyzer:
         schema_name: str = "",
     ) -> Dict:
         category, reason = cls.classify_table(name, ddl)
+        is_legacy, legacy_reason = cls.check_legacy(name, schema_name)
         return {
             "name": name,
             "object_type": "table",
@@ -352,6 +462,12 @@ class SQLAnalyzer:
             "target_tables": [],
             "dependencies": [],
             "source_hash": cls._hash(ddl) if ddl else "",
+            "language": None,
+            "has_dynamic_sql": False,
+            "parse_method": None,
+            "is_legacy": is_legacy,
+            "legacy_reason": legacy_reason,
+            "references_legacy": False,
         }
 
     # -------------------------------------------------------------------
@@ -397,9 +513,11 @@ class SQLAnalyzer:
 
     @staticmethod
     def _count_sql_ops(body: str) -> int:
-        """Count distinct SQL write operations. Each statement type counted once per occurrence."""
-        count = 0
+        """Count SQL write operations.  MERGE blocks are removed before counting
+        INSERT/UPDATE/DELETE so the clauses inside MERGE are not double-counted."""
+        count = len(re.findall(r'\bMERGE\s+INTO\b', body, re.IGNORECASE))
+        body_no_merge = re.sub(r'\bMERGE\s+INTO\b.*?;', '', body, flags=re.IGNORECASE | re.DOTALL)
         for op in [r"\bINSERT\s+INTO\b", r"\bUPDATE\s+(?!SET\b)\w", r"\bDELETE\s+FROM\b",
-                    r"\bMERGE\s+INTO\b", r"\bTRUNCATE\b", r"\bCREATE\s+(?:OR\s+REPLACE\s+)?TABLE\b"]:
-            count += len(re.findall(op, body, re.IGNORECASE))
+                    r"\bTRUNCATE\b", r"\bCREATE\s+(?:OR\s+REPLACE\s+)?TABLE\b"]:
+            count += len(re.findall(op, body_no_merge, re.IGNORECASE))
         return count

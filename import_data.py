@@ -81,6 +81,12 @@ def _import_legacy_sps(data: list):
                 target_tables=json.dumps(analysis["target_tables"]),
                 dependencies=json.dumps(analysis["dependencies"]),
                 source_hash=analysis["source_hash"],
+                language=analysis.get("language"),
+                has_dynamic_sql=analysis.get("has_dynamic_sql", False),
+                parse_method=analysis.get("parse_method"),
+                is_legacy=analysis.get("is_legacy", False),
+                legacy_reason=analysis.get("legacy_reason"),
+                references_legacy=analysis.get("references_legacy", False),
             )
             db.add(obj)
             db.flush()
@@ -152,6 +158,20 @@ def _import_multi_object(data: list):
             _insert_object(db, analysis)
             counts["table"] += 1
 
+        # Second pass: flag objects that reference legacy objects
+        legacy_names = set()
+        for obj in db.query(SourceObject).filter(SourceObject.is_legacy == True).all():
+            legacy_names.add(obj.name.upper())
+        if legacy_names:
+            for obj in db.query(SourceObject).filter(SourceObject.is_legacy == False).all():
+                deps = json.loads(obj.dependencies) if obj.dependencies else []
+                calls_list = json.loads(obj.calls) if obj.calls else []
+                targets = json.loads(obj.target_tables) if obj.target_tables else []
+                for ref in deps + calls_list + targets:
+                    if ref.split(".")[-1].strip('"').upper() in legacy_names:
+                        obj.references_legacy = True
+                        break
+
         db.commit()
         print(f"\n[OK] Imported: {counts['procedure']} procedures, {counts['view']} views, {counts['table']} tables")
         print(f"     Skipped: {counts['skipped']}")
@@ -177,6 +197,12 @@ def _insert_object(db, analysis: dict):
         target_tables=json.dumps(analysis.get("target_tables", [])),
         dependencies=json.dumps(analysis.get("dependencies", [])),
         source_hash=analysis.get("source_hash", ""),
+        language=analysis.get("language"),
+        has_dynamic_sql=analysis.get("has_dynamic_sql", False),
+        parse_method=analysis.get("parse_method"),
+        is_legacy=analysis.get("is_legacy", False),
+        legacy_reason=analysis.get("legacy_reason"),
+        references_legacy=analysis.get("references_legacy", False),
     )
     db.add(obj)
     db.flush()

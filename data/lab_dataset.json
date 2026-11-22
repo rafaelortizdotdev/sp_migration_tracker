@@ -306,5 +306,143 @@
     "object_type": "table",
     "schema_name": "DW_DEV",
     "ddl": "CREATE TABLE LAB_DB.DW_DEV.FACT_SALES_BAK (\n  sale_id BIGINT,\n  store_id INT,\n  product_id INT,\n  date_key INT,\n  quantity INT,\n  unit_price DECIMAL(12,2),\n  unit_cost DECIMAL(12,2),\n  total_amount DECIMAL(14,2),\n  created_at TIMESTAMP\n);"
+  },
+
+  {
+    "name": "DIM_CUSTOMER",
+    "object_type": "table",
+    "schema_name": "DW",
+    "ddl": "CREATE TABLE LAB_DB.DW.DIM_CUSTOMER (\n  customer_id INT PRIMARY KEY,\n  first_name VARCHAR(100),\n  last_name VARCHAR(100),\n  email VARCHAR(200),\n  loyalty_tier VARCHAR(20),\n  signup_date DATE,\n  is_current BOOLEAN DEFAULT TRUE,\n  valid_from TIMESTAMP,\n  valid_to TIMESTAMP,\n  etl_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),\n  etl_updated_at TIMESTAMP\n);"
+  },
+  {
+    "name": "FACT_CUSTOMER_ORDERS",
+    "object_type": "table",
+    "schema_name": "DW",
+    "ddl": "CREATE TABLE LAB_DB.DW.FACT_CUSTOMER_ORDERS (\n  order_id BIGINT PRIMARY KEY,\n  customer_id INT REFERENCES DW.DIM_CUSTOMER(customer_id),\n  store_id INT,\n  order_date DATE,\n  item_count INT,\n  subtotal DECIMAL(14,2),\n  discount DECIMAL(10,2),\n  total DECIMAL(14,2),\n  channel VARCHAR(20),\n  etl_batch_id VARCHAR(50)\n);"
+  },
+  {
+    "name": "STG_JSON_EVENTS",
+    "object_type": "table",
+    "schema_name": "STAGING",
+    "ddl": "CREATE TABLE LAB_DB.STAGING.STG_JSON_EVENTS (\n  event_id BIGINT,\n  event_type VARCHAR(50),\n  payload VARIANT,\n  received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()\n);"
+  },
+  {
+    "name": "REPORT_OUTPUT",
+    "object_type": "table",
+    "schema_name": "DW",
+    "ddl": "CREATE TABLE LAB_DB.DW.REPORT_OUTPUT (\n  report_id INT AUTOINCREMENT PRIMARY KEY,\n  report_name VARCHAR(200),\n  metric_key VARCHAR(100),\n  metric_value DECIMAL(16,4),\n  report_date DATE,\n  generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()\n);"
+  },
+  {
+    "name": "PARTITION_LOG",
+    "object_type": "table",
+    "schema_name": "DW",
+    "ddl": "CREATE TABLE LAB_DB.DW.PARTITION_LOG (\n  id INT AUTOINCREMENT PRIMARY KEY,\n  table_name VARCHAR(200),\n  partition_key VARCHAR(100),\n  rows_removed INT,\n  executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()\n);"
+  },
+  {
+    "name": "SCHEMA_REGISTRY",
+    "object_type": "table",
+    "schema_name": "DW",
+    "ddl": "CREATE TABLE LAB_DB.DW.SCHEMA_REGISTRY (\n  table_name VARCHAR(200) PRIMARY KEY,\n  expected_columns INT,\n  last_validated TIMESTAMP,\n  status VARCHAR(20) DEFAULT 'PENDING'\n);"
+  },
+  {
+    "name": "RAW_CUSTOMERS",
+    "object_type": "table",
+    "schema_name": "STAGING",
+    "ddl": "CREATE TABLE LAB_DB.STAGING.RAW_CUSTOMERS (\n  customer_id INT,\n  first_name VARCHAR(100),\n  last_name VARCHAR(100),\n  email VARCHAR(200),\n  loyalty_tier VARCHAR(20),\n  signup_date DATE,\n  loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()\n);"
+  },
+
+  {
+    "name": "SP_JS_FLATTEN_EVENTS",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_JS_FLATTEN_EVENTS()\nRETURNS STRING\nLANGUAGE JAVASCRIPT\nEXECUTE AS CALLER\nAS $$\nvar stmt = snowflake.createStatement({sqlText: \"INSERT INTO DW.FACT_CUSTOMER_ORDERS (order_id, customer_id, store_id, order_date, item_count, subtotal, discount, total, channel) SELECT e.payload:order_id::BIGINT, e.payload:customer_id::INT, e.payload:store_id::INT, e.payload:order_date::DATE, e.payload:item_count::INT, e.payload:subtotal::DECIMAL(14,2), e.payload:discount::DECIMAL(10,2), e.payload:total::DECIMAL(14,2), e.payload:channel::VARCHAR FROM STAGING.STG_JSON_EVENTS e WHERE e.event_type = 'ORDER' AND e.payload:order_id NOT IN (SELECT order_id FROM DW.FACT_CUSTOMER_ORDERS)\"});\nvar result = stmt.execute();\nvar logStmt = snowflake.createStatement({sqlText: \"CALL DW.SP_JS_ERROR_HANDLER('SP_JS_FLATTEN_EVENTS', 'SUCCESS', '')\"});\nlogStmt.execute();\nreturn 'Events flattened';\n$$;"
+  },
+  {
+    "name": "SP_JS_MULTI_TABLE_SYNC",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_JS_MULTI_TABLE_SYNC()\nRETURNS STRING\nLANGUAGE JAVASCRIPT\nEXECUTE AS CALLER\nAS $$\nvar tables = ['DIM_STORE', 'DIM_PRODUCT', 'DIM_CUSTOMER'];\nvar synced = 0;\nfor (var i = 0; i < tables.length; i++) {\n  var tbl = tables[i];\n  var sql = \"INSERT INTO DW.\" + tbl + \" SELECT * FROM STAGING.RAW_\" + tbl.replace('DIM_', '') + \"S\";\n  var stmt = snowflake.createStatement({sqlText: sql});\n  stmt.execute();\n  synced++;\n}\nreturn 'Synced ' + synced + ' tables';\n$$;"
+  },
+  {
+    "name": "SP_JS_VALIDATE_SCHEMA",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_JS_VALIDATE_SCHEMA()\nRETURNS STRING\nLANGUAGE JAVASCRIPT\nEXECUTE AS CALLER\nAS $$\nvar listStmt = snowflake.createStatement({sqlText: \"SELECT table_name, expected_columns FROM DW.SCHEMA_REGISTRY WHERE status = 'PENDING'\"});\nvar rs = listStmt.execute();\nvar failures = [];\nwhile (rs.next()) {\n  var tbl = rs.getColumnValue(1);\n  var expected = rs.getColumnValue(2);\n  var updStmt = snowflake.createStatement({sqlText: \"UPDATE DW.SCHEMA_REGISTRY SET status = 'VALID', last_validated = CURRENT_TIMESTAMP() WHERE table_name = '\" + tbl + \"'\"});\n  updStmt.execute();\n}\nreturn failures.length === 0 ? 'All schemas valid' : 'Drift: ' + failures.join(', ');\n$$;"
+  },
+  {
+    "name": "SP_JS_GENERATE_REPORT",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_JS_GENERATE_REPORT(\"REPORT_NAME\" VARCHAR)\nRETURNS STRING\nLANGUAGE JAVASCRIPT\nEXECUTE AS CALLER\nAS $$\nvar metrics = [\n  {key: 'total_revenue', sql: \"SELECT SUM(total_amount) FROM DW.FACT_SALES\"},\n  {key: 'total_orders', sql: \"SELECT COUNT(*) FROM DW.FACT_CUSTOMER_ORDERS\"},\n  {key: 'active_stores', sql: \"SELECT COUNT(*) FROM DW.DIM_STORE WHERE close_date IS NULL\"}\n];\nfor (var i = 0; i < metrics.length; i++) {\n  var m = metrics[i];\n  var valStmt = snowflake.createStatement({sqlText: m.sql});\n  var rs = valStmt.execute();\n  rs.next();\n  var val = rs.getColumnValue(1);\n  var insStmt = snowflake.createStatement({sqlText: \"INSERT INTO DW.REPORT_OUTPUT (report_name, metric_key, metric_value, report_date) VALUES ('\" + REPORT_NAME + \"', '\" + m.key + \"', \" + val + \", CURRENT_DATE())\"});\n  insStmt.execute();\n}\nreturn 'Report generated';\n$$;"
+  },
+  {
+    "name": "SP_JS_SCD_TYPE2",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_JS_SCD_TYPE2()\nRETURNS STRING\nLANGUAGE JAVASCRIPT\nEXECUTE AS CALLER\nAS $$\n// Close existing records that have changed\nvar closeStmt = snowflake.createStatement({sqlText: \"UPDATE DW.DIM_CUSTOMER SET is_current = FALSE, valid_to = CURRENT_TIMESTAMP() WHERE customer_id IN (SELECT c.customer_id FROM DW.DIM_CUSTOMER c JOIN STAGING.RAW_CUSTOMERS r ON c.customer_id = r.customer_id WHERE c.is_current = TRUE AND (c.loyalty_tier != r.loyalty_tier OR c.email != r.email))\"});\ncloseStmt.execute();\nvar insertStmt = snowflake.createStatement({sqlText: \"INSERT INTO DW.DIM_CUSTOMER (customer_id, first_name, last_name, email, loyalty_tier, signup_date, is_current, valid_from) SELECT r.customer_id, r.first_name, r.last_name, r.email, r.loyalty_tier, r.signup_date, TRUE, CURRENT_TIMESTAMP() FROM STAGING.RAW_CUSTOMERS r WHERE NOT EXISTS (SELECT 1 FROM DW.DIM_CUSTOMER c WHERE c.customer_id = r.customer_id AND c.is_current = TRUE AND c.loyalty_tier = r.loyalty_tier AND c.email = r.email)\"});\ninsertStmt.execute();\nreturn 'SCD Type 2 applied';\n$$;"
+  },
+  {
+    "name": "SP_JS_ERROR_HANDLER",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_JS_ERROR_HANDLER(\"PROC_NAME\" VARCHAR, \"STATUS\" VARCHAR, \"ERROR_MSG\" VARCHAR)\nRETURNS STRING\nLANGUAGE JAVASCRIPT\nEXECUTE AS CALLER\nAS $$\nvar stmt = snowflake.createStatement({sqlText: \"INSERT INTO DW.ETL_LOG (log_message, log_timestamp, log_level) VALUES ('\" + PROC_NAME + \": \" + STATUS + \"', CURRENT_TIMESTAMP(), '\" + (STATUS === 'SUCCESS' ? 'INFO' : 'ERROR') + \"')\"});\nstmt.execute();\nreturn STATUS;\n$$;"
+  },
+  {
+    "name": "SP_JS_PARTITION_CLEANUP",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_JS_PARTITION_CLEANUP(\"RETENTION_DAYS\" NUMBER)\nRETURNS STRING\nLANGUAGE JAVASCRIPT\nEXECUTE AS CALLER\nAS $$\nvar cutoff = \"DATEADD(DAY, -\" + RETENTION_DAYS + \", CURRENT_DATE())\";\nvar delStmt = snowflake.createStatement({sqlText: \"DELETE FROM DW.FACT_SALES WHERE date_key IN (SELECT date_key FROM DW.DIM_DATE WHERE day_date < \" + cutoff + \")\"});\nvar result = delStmt.execute();\nresult.next();\nvar removed = result.getColumnValue(1);\nvar logStmt = snowflake.createStatement({sqlText: \"INSERT INTO DW.PARTITION_LOG (table_name, partition_key, rows_removed) VALUES ('FACT_SALES', 'date_key', \" + removed + \")\"});\nlogStmt.execute();\nreturn 'Removed ' + removed + ' rows';\n$$;"
+  },
+  {
+    "name": "SP_JS_ORCHESTRATE_EVENTS",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_JS_ORCHESTRATE_EVENTS()\nRETURNS STRING\nLANGUAGE JAVASCRIPT\nEXECUTE AS CALLER\nAS $$\nvar step1 = snowflake.createStatement({sqlText: \"CALL DW.SP_JS_FLATTEN_EVENTS()\"});\nstep1.execute();\nvar step2 = snowflake.createStatement({sqlText: \"CALL DW.SP_JS_VALIDATE_SCHEMA()\"});\nstep2.execute();\nvar step3 = snowflake.createStatement({sqlText: \"CALL DW.SP_JS_SCD_TYPE2()\"});\nstep3.execute();\nvar step4 = snowflake.createStatement({sqlText: \"CALL DW.SP_JS_ERROR_HANDLER('SP_JS_ORCHESTRATE_EVENTS', 'SUCCESS', '')\"});\nstep4.execute();\nreturn 'Event pipeline complete';\n$$;"
+  },
+
+  {
+    "name": "SP_SCRIPTING_RETRY_LOADER",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_SCRIPTING_RETRY_LOADER(\"MAX_RETRIES\" INT)\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nDECLARE\n  attempt INT DEFAULT 0;\n  row_count INT DEFAULT 0;\n  rs RESULTSET;\nBEGIN\n  WHILE (attempt < :MAX_RETRIES AND row_count = 0) DO\n    LET attempt := attempt + 1;\n    INSERT INTO DW.FACT_CUSTOMER_ORDERS (order_id, customer_id, store_id, order_date, item_count, subtotal, discount, total, channel)\n    SELECT e.payload:order_id::BIGINT, e.payload:customer_id::INT, e.payload:store_id::INT,\n           e.payload:order_date::DATE, e.payload:item_count::INT, e.payload:subtotal::DECIMAL(14,2),\n           e.payload:discount::DECIMAL(10,2), e.payload:total::DECIMAL(14,2), e.payload:channel::VARCHAR\n    FROM STAGING.STG_JSON_EVENTS e\n    WHERE e.event_type = 'ORDER'\n      AND e.payload:order_id NOT IN (SELECT order_id FROM DW.FACT_CUSTOMER_ORDERS);\n    rs := (SELECT COUNT(*) AS cnt FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));\n    LET row_count := (SELECT cnt FROM TABLE(rs));\n  END WHILE;\n  CALL DW.SP_LOG_ETL_STATUS('Retry loader: ' || attempt || ' attempts, ' || row_count || ' rows');\n  RETURN 'Loaded ' || row_count || ' rows in ' || attempt || ' attempts';\nEND;\n$$;"
+  },
+  {
+    "name": "SP_SCRIPTING_CONDITIONAL_LOAD",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_SCRIPTING_CONDITIONAL_LOAD(\"TARGET_TABLE\" VARCHAR)\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nDECLARE\n  stg_count INT;\n  load_sql VARCHAR;\nBEGIN\n  SELECT COUNT(*) INTO :stg_count FROM STAGING.RAW_TRANSACTIONS WHERE loaded_at > DATEADD(HOUR, -1, CURRENT_TIMESTAMP());\n  IF (stg_count > 0) THEN\n    load_sql := 'INSERT INTO DW.' || :TARGET_TABLE || ' SELECT * FROM STAGING.RAW_TRANSACTIONS WHERE loaded_at > DATEADD(HOUR, -1, CURRENT_TIMESTAMP())';\n    EXECUTE IMMEDIATE :load_sql;\n    CALL DW.SP_LOG_ETL_STATUS('Conditional load: ' || stg_count || ' rows into ' || :TARGET_TABLE);\n  ELSE\n    CALL DW.SP_LOG_ETL_STATUS('Conditional load: no new data for ' || :TARGET_TABLE);\n  END IF;\n  RETURN 'Done';\nEND;\n$$;"
+  },
+  {
+    "name": "SP_SCRIPTING_CURSOR_PROCESS",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_SCRIPTING_CURSOR_PROCESS()\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nDECLARE\n  c1 CURSOR FOR SELECT product_id, product_name FROM DW.DIM_PRODUCT WHERE is_active = TRUE;\n  pid INT;\n  pname VARCHAR;\n  processed INT DEFAULT 0;\nBEGIN\n  FOR row IN c1 DO\n    pid := row.product_id;\n    pname := row.product_name;\n    UPDATE DW.DIM_PRODUCT SET etl_updated_at = CURRENT_TIMESTAMP() WHERE product_id = :pid;\n    LET processed := processed + 1;\n  END FOR;\n  CALL DW.SP_LOG_ETL_STATUS('Cursor process: updated ' || processed || ' products');\n  RETURN 'Processed ' || processed || ' products';\nEND;\n$$;"
+  },
+
+  {
+    "name": "SP_COMPACT_UPSERT",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_COMPACT_UPSERT()\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS 'MERGE INTO DW.DIM_CUSTOMER tgt USING STAGING.RAW_CUSTOMERS src ON tgt.customer_id = src.customer_id WHEN MATCHED THEN UPDATE SET tgt.first_name = src.first_name, tgt.last_name = src.last_name, tgt.email = src.email, tgt.loyalty_tier = src.loyalty_tier, tgt.etl_updated_at = CURRENT_TIMESTAMP() WHEN NOT MATCHED THEN INSERT (customer_id, first_name, last_name, email, loyalty_tier, signup_date, is_current, valid_from, etl_created_at) VALUES (src.customer_id, src.first_name, src.last_name, src.email, src.loyalty_tier, src.signup_date, TRUE, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP());'"
+  },
+
+  {
+    "name": "SP_MASTER_PIPELINE",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_MASTER_PIPELINE()\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nCALL DW.SP_RUN_NIGHTLY_ETL();\nCALL DW.SP_JS_ORCHESTRATE_EVENTS();\nCALL DW.SP_JS_MULTI_TABLE_SYNC();\nCALL DW.SP_SCRIPTING_CONDITIONAL_LOAD('FACT_SALES');\nCALL DW.SP_JS_GENERATE_REPORT('DAILY_SUMMARY');\nCALL DW.SP_LOG_ETL_STATUS('Master pipeline complete');\n$$;"
+  },
+
+  {
+    "name": "V_SALES_DRIFT_CHECK",
+    "object_type": "view",
+    "schema_name": "DW",
+    "ddl": "CREATE VIEW LAB_DB.DW.V_SALES_DRIFT_CHECK AS\nSELECT\n  f.sale_id,\n  f.total_amount AS current_amount,\n  b.total_amount AS bak_amount,\n  f.total_amount - b.total_amount AS diff\nFROM DW.FACT_SALES f\nJOIN DW_DEV.FACT_SALES_BAK b ON f.sale_id = b.sale_id;"
+  },
+  {
+    "name": "V_CUSTOMER_LIFETIME_VALUE",
+    "object_type": "view",
+    "schema_name": "DW",
+    "ddl": "CREATE VIEW LAB_DB.DW.V_CUSTOMER_LIFETIME_VALUE AS\nWITH order_summary AS (\n  SELECT\n    customer_id,\n    COUNT(*) AS order_count,\n    SUM(total) AS lifetime_spend,\n    MIN(order_date) AS first_order,\n    MAX(order_date) AS last_order\n  FROM DW.FACT_CUSTOMER_ORDERS\n  GROUP BY customer_id\n)\nSELECT\n  c.customer_id,\n  c.first_name || ' ' || c.last_name AS full_name,\n  c.loyalty_tier,\n  o.order_count,\n  o.lifetime_spend,\n  o.first_order,\n  o.last_order,\n  DATEDIFF(DAY, o.first_order, o.last_order) AS customer_tenure_days\nFROM DW.DIM_CUSTOMER c\nJOIN order_summary o ON c.customer_id = o.customer_id\nWHERE c.is_current = TRUE;"
   }
 ]
