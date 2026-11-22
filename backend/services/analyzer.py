@@ -211,7 +211,7 @@ class SQLAnalyzer:
         is_root = call_count > 0 and called_by_count == 0
         is_utility = called_by_count >= 2 and call_count == 0
 
-        if has_legacy and sql_ops == 0 and call_count == 0:
+        if has_legacy:
             return "Legacy", "Contains DEV/BAK/JUNK schema references"
         if has_control and (has_scheduler_kw or is_root):
             return "ETL Control", "Manages job state, batch IDs, or scheduling"
@@ -228,8 +228,6 @@ class SQLAnalyzer:
             if ratio > 0.7:
                 return "Hybrid", f"Mostly transformation ({sql_ops} SQL) but calls {call_count}"
             return "Hybrid", f"Mostly orchestration ({call_count} calls) with {sql_ops} SQL"
-        if has_legacy:
-            return "Legacy", "Contains DEV/BAK/JUNK schema references"
         return "Unknown", "Could not determine category"
 
     @classmethod

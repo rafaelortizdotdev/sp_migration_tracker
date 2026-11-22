@@ -1,6 +1,4 @@
 [
-  {"comment": "=== PROCEDURES: covers all 7 classification categories ==="},
-
   {
     "name": "SP_RUN_NIGHTLY_ETL",
     "object_type": "procedure",
@@ -89,7 +87,7 @@
     "name": "SP_FIX_COGS_JUNK_DEV",
     "object_type": "procedure",
     "schema_name": "DW_DEV",
-    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW_DEV.SP_FIX_COGS_JUNK_DEV()\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nUPDATE DW_DEV.FACT_SALES_BAK SET unit_cost = 0 WHERE unit_cost IS NULL;\nDELETE FROM DW_DEV.JUNK_TEMP WHERE created_at < '2022-01-01';\n$$;"
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW_DEV.SP_FIX_COGS_JUNK_DEV()\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nUPDATE DW_DEV.FACT_SALES_BAK SET unit_cost = 0 WHERE unit_cost IS NULL;\nDELETE FROM DW_DEV.JUNK_TEMP_DATA WHERE created_at < '2022-01-01';\n$$;"
   },
   {
     "name": "SP_REBUILD_INDEXES_BAK",
@@ -109,8 +107,6 @@
     "schema_name": "DW",
     "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_FULL_REFRESH_DAILY()\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nCALL DW.SP_RUN_NIGHTLY_ETL();\nCALL DW.SP_LOAD_PROMOTIONS();\nCALL DW.SP_LOAD_RETURNS('DAILY');\nCALL DW.SP_ARCHIVE_OLD_DATA(DATEADD(YEAR, -3, CURRENT_DATE()));\n$$;"
   },
-
-  {"comment": "=== VIEWS: covers all 6 classification categories ==="},
 
   {
     "name": "V_ACTIVE_STORES",
@@ -158,7 +154,7 @@
     "name": "MV_MONTHLY_REVENUE",
     "object_type": "view",
     "schema_name": "DW",
-    "ddl": "CREATE MATERIALIZED VIEW LAB_DB.DW.MV_MONTHLY_REVENUE AS\nSELECT\n  d.year_num,\n  d.month_num,\n  SUM(f.total_amount) AS monthly_revenue,\n  COUNT(DISTINCT f.sale_id) AS transaction_count\nFROM DW.FACT_SALES f\nJOIN DW.DIM_DATE d ON f.date_key = d.date_key\nGROUP BY d.year_num, d.month_num;"
+    "ddl": "CREATE MATERIALIZED VIEW LAB_DB.DW.MV_MONTHLY_REVENUE AS\nSELECT\n  d.year_num,\n  d.month_num,\n  s.store_id,\n  SUM(f.total_amount) AS monthly_revenue,\n  SUM(f.quantity) AS monthly_units,\n  COUNT(DISTINCT f.sale_id) AS monthly_transactions\nFROM DW.FACT_SALES f\nJOIN DW.DIM_DATE d ON f.date_key = d.date_key\nJOIN DW.DIM_STORE s ON f.store_id = s.store_id\nGROUP BY d.year_num, d.month_num, s.store_id;"
   },
   {
     "name": "V_OLD_DEV_SCRATCH",
@@ -166,8 +162,6 @@
     "schema_name": "DW_DEV",
     "ddl": "CREATE VIEW LAB_DB.DW_DEV.V_OLD_DEV_SCRATCH AS\nSELECT * FROM DW_DEV.JUNK_TEMP_DATA WHERE 1=0;"
   },
-
-  {"comment": "=== TABLES: fact, dimension, staging, support, legacy ==="},
 
   {
     "name": "DIM_STORE",
@@ -236,6 +230,30 @@
     "ddl": "CREATE TABLE LAB_DB.STAGING.RAW_PRODUCTS (\n  product_id INT,\n  sku VARCHAR(50),\n  product_name VARCHAR(300),\n  brand VARCHAR(100),\n  category_id INT,\n  unit_cost DECIMAL(12,2),\n  unit_price DECIMAL(12,2),\n  is_active BOOLEAN\n);"
   },
   {
+    "name": "RAW_INVENTORY",
+    "object_type": "table",
+    "schema_name": "STAGING",
+    "ddl": "CREATE TABLE LAB_DB.STAGING.RAW_INVENTORY (\n  snapshot_date DATE,\n  store_id INT,\n  product_id INT,\n  qty_on_hand INT,\n  qty_on_order INT,\n  reorder_point INT,\n  loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()\n);"
+  },
+  {
+    "name": "RAW_RETURNS",
+    "object_type": "table",
+    "schema_name": "STAGING",
+    "ddl": "CREATE TABLE LAB_DB.STAGING.RAW_RETURNS (\n  return_id BIGINT,\n  original_sale_id BIGINT,\n  store_id INT,\n  product_id INT,\n  return_date DATE,\n  quantity INT,\n  reason_code VARCHAR(20),\n  refund_amount DECIMAL(12,2),\n  loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()\n);"
+  },
+  {
+    "name": "RAW_PROMOTIONS",
+    "object_type": "table",
+    "schema_name": "STAGING",
+    "ddl": "CREATE TABLE LAB_DB.STAGING.RAW_PROMOTIONS (\n  promo_id INT,\n  promo_name VARCHAR(200),\n  discount_type VARCHAR(20),\n  discount_value DECIMAL(8,2),\n  start_date DATE,\n  end_date DATE,\n  loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()\n);"
+  },
+  {
+    "name": "RAW_CATEGORIES",
+    "object_type": "table",
+    "schema_name": "STAGING",
+    "ddl": "CREATE TABLE LAB_DB.STAGING.RAW_CATEGORIES (\n  category_id INT PRIMARY KEY,\n  category_name VARCHAR(100),\n  subcategory_name VARCHAR(100)\n);"
+  },
+  {
     "name": "ETL_LOG",
     "object_type": "table",
     "schema_name": "DW",
@@ -246,6 +264,12 @@
     "object_type": "table",
     "schema_name": "DW",
     "ddl": "CREATE TABLE LAB_DB.DW.ETL_BATCH (\n  batch_id INT AUTOINCREMENT PRIMARY KEY,\n  status VARCHAR(20) DEFAULT 'PENDING',\n  started_at TIMESTAMP,\n  finished_at TIMESTAMP,\n  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()\n);"
+  },
+  {
+    "name": "VALIDATION_LOG",
+    "object_type": "table",
+    "schema_name": "DW",
+    "ddl": "CREATE TABLE LAB_DB.DW.VALIDATION_LOG (\n  id INT AUTOINCREMENT PRIMARY KEY,\n  table_name VARCHAR(200),\n  check_type VARCHAR(50),\n  check_result VARCHAR(500),\n  check_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP()\n);"
   },
   {
     "name": "LKP_REGION",
@@ -260,14 +284,27 @@
     "ddl": "CREATE TABLE LAB_DB.DW.LKP_EXCHANGE_RATES (\n  source_currency VARCHAR(3),\n  target_currency VARCHAR(3),\n  exchange_rate DECIMAL(12,6),\n  effective_from DATE,\n  effective_to DATE\n);"
   },
   {
+    "name": "FACT_SALES_HIST",
+    "object_type": "table",
+    "schema_name": "ARCHIVE",
+    "ddl": "CREATE TABLE LAB_DB.ARCHIVE.FACT_SALES_HIST (\n  sale_id BIGINT,\n  store_id INT,\n  product_id INT,\n  date_key INT,\n  quantity INT,\n  unit_price DECIMAL(12,2),\n  discount_pct DECIMAL(5,2),\n  net_amount DECIMAL(14,2),\n  tax_amount DECIMAL(10,2),\n  total_amount DECIMAL(14,2),\n  etl_batch_id VARCHAR(50),\n  archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()\n);"
+  },
+  {
     "name": "JUNK_TEMP_DATA",
     "object_type": "table",
     "schema_name": "DW_DEV",
     "ddl": "CREATE TABLE LAB_DB.DW_DEV.JUNK_TEMP_DATA (\n  id INT,\n  payload VARCHAR(4000),\n  created_at TIMESTAMP\n);"
   },
   {
+    "name": "TEMP_BAK_INDEXES",
+    "object_type": "table",
+    "schema_name": "DW_DEV",
+    "ddl": "CREATE TABLE LAB_DB.DW_DEV.TEMP_BAK_INDEXES (\n  index_name VARCHAR(200),\n  table_name VARCHAR(200),\n  created_at TIMESTAMP\n);"
+  },
+  {
     "name": "FACT_SALES_BAK",
     "object_type": "table",
-    "schema_name": "DW_DEV"
+    "schema_name": "DW_DEV",
+    "ddl": "CREATE TABLE LAB_DB.DW_DEV.FACT_SALES_BAK (\n  sale_id BIGINT,\n  store_id INT,\n  product_id INT,\n  date_key INT,\n  quantity INT,\n  unit_price DECIMAL(12,2),\n  unit_cost DECIMAL(12,2),\n  total_amount DECIMAL(14,2),\n  created_at TIMESTAMP\n);"
   }
 ]
