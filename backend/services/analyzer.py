@@ -248,7 +248,7 @@ class SQLAnalyzer:
     @classmethod
     def classify_table(cls, name: str, ddl: str) -> Tuple[str, str]:
         """Classify a table as a dependency node — always 'Table'."""
-        has_legacy = bool(re.search(r'\b(?:_DEV|_BAK|JUNK)\b', ddl or "", re.IGNORECASE))
+        has_legacy = bool(re.search(r'(?:_DEV|_BAK|JUNK)', ddl or name or "", re.IGNORECASE))
         if has_legacy:
             return "Legacy", "Table in DEV/BAK/JUNK schema"
         return "Table", "Data table (dependency node)"
