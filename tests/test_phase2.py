@@ -1,146 +1,131 @@
 """
-Test script for Phase 2 - Virtual Splitting
+Tests for Phase 2 — virtual splitting (split/unsplit/preview).
 """
-import requests
+import pytest
+import sys
+import os
 import json
 
-BASE_URL = "http://localhost:8000/api"
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from backend.database import Base, get_db
+from backend.main import app
+from backend.models import SourceObject, MigrationState
 
 
-def test_split_preview():
-    """Test split preview endpoint"""
-    print("\n=== Testing Split Preview ===")
-    
-    # Find a Hybrid SP
-    response = requests.get(f"{BASE_URL}/sps?category=Hybrid")
-    sps = response.json()
-    
-    if not sps:
-        print("No Hybrid SPs found")
-        return None
-    
-    sp_name = sps[0]['name']
-    print(f"Testing with: {sp_name}")
-    
-    # Get split preview
-    response = requests.get(f"{BASE_URL}/nodes/{sp_name}/split-preview")
-    preview = response.json()
-    
-    print(f"\nCan split: {preview['can_split']}")
-    print(f"\nORCH Preview:")
-    print(f"  Name: {preview['orch_preview']['name']}")
-    print(f"  Calls: {preview['orch_preview']['calls']}")
-    print(f"\nLOGIC Preview:")
-    print(f"  Name: {preview['logic_preview']['name']}")
-    print(f"  Target Tables: {preview['logic_preview']['target_tables']}")
-    
-    return sp_name
+engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+TestSession = sessionmaker(bind=engine)
 
 
-def test_split(sp_name):
-    """Test actual split"""
-    print(f"\n=== Testing Split: {sp_name} ===")
-    
-    response = requests.post(
-        f"{BASE_URL}/nodes/{sp_name}/split",
-        json={"user": "test_user"}
+def override_get_db():
+    db = TestSession()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+app.dependency_overrides[get_db] = override_get_db
+client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def setup_db():
+    Base.metadata.create_all(bind=engine)
+    db = TestSession()
+
+    hybrid = SourceObject(
+        name="REFRESH_INVENTORY",
+        object_type="procedure",
+        schema_name="DW",
+        ddl="TRUNCATE TABLE DW.FACT_INV;\nINSERT INTO DW.FACT_INV SELECT * FROM STAGING.INV;\nCALL UPDATE_AGGREGATES();",
+        category="Hybrid",
+        reason="Mix of SQL and calls",
+        loc=3,
+        calls='["UPDATE_AGGREGATES"]',
+        called_by=1,
+        target_tables='["DW.FACT_INV"]',
+        dependencies='["STAGING.INV"]',
+        source_hash="aaa",
     )
-    
-    if response.status_code == 200:
-        result = response.json()
-        print(f"✓ Split successful!")
-        print(f"  Original hidden: {result['original_hidden']}")
-        print(f"  Created nodes:")
-        for node in result['created_nodes']:
-            print(f"    - {node['name']} ({node['type']})")
-        if result['warnings']:
-            print(f"  Warnings:")
-            for warning in result['warnings']:
-                print(f"    ! {warning}")
-        return True
-    else:
-        print(f"✗ Split failed: {response.status_code}")
-        print(f"  {response.json()}")
-        return False
-
-
-def test_list_virtual_nodes():
-    """Test listing virtual nodes"""
-    print("\n=== Testing Virtual Nodes List ===")
-    
-    response = requests.get(f"{BASE_URL}/virtual-nodes")
-    nodes = response.json()
-    
-    print(f"Found {len(nodes)} virtual nodes:")
-    for node in nodes:
-        print(f"  - {node['name']} ({node['node_type']}) from {node['parent_sp_name']}")
-
-
-def test_merged_list():
-    """Test merged SP list (source + virtual)"""
-    print("\n=== Testing Merged SP List ===")
-    
-    response = requests.get(f"{BASE_URL}/sps")
-    sps = response.json()
-    
-    virtual_count = sum(1 for sp in sps if sp.get('is_virtual'))
-    source_count = len(sps) - virtual_count
-    
-    print(f"Total SPs: {len(sps)}")
-    print(f"  Source SPs: {source_count}")
-    print(f"  Virtual nodes: {virtual_count}")
-
-
-def test_unsplit(sp_name):
-    """Test unsplit"""
-    print(f"\n=== Testing Unsplit: {sp_name} ===")
-    
-    response = requests.post(
-        f"{BASE_URL}/nodes/{sp_name}/unsplit",
-        json={"user": "test_user"}
+    callee = SourceObject(
+        name="UPDATE_AGGREGATES",
+        object_type="procedure",
+        schema_name="DW",
+        ddl="INSERT INTO DW.AGG_DAILY SELECT * FROM DW.FACT_SALES GROUP BY day;",
+        category="Transformation",
+        reason="Pure SQL",
+        loc=1,
+        calls="[]",
+        called_by=1,
+        target_tables='["DW.AGG_DAILY"]',
+        dependencies='["DW.FACT_SALES"]',
+        source_hash="bbb",
     )
-    
-    if response.status_code == 200:
-        result = response.json()
-        print(f"✓ Unsplit successful!")
-        print(f"  {result['message']}")
-        return True
-    else:
-        print(f"✗ Unsplit failed: {response.status_code}")
-        print(f"  {response.json()}")
-        return False
+    db.add_all([hybrid, callee])
+    db.flush()
+    for obj in [hybrid, callee]:
+        db.add(MigrationState(source_object_id=obj.id, status="Not Started"))
+    db.commit()
+    db.close()
+    yield
+    Base.metadata.drop_all(bind=engine)
+
+
+class TestSplitPreview:
+
+    def test_preview_hybrid(self):
+        r = client.get("/api/nodes/REFRESH_INVENTORY/split-preview")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["can_split"] is True
+        assert "orch_preview" in data
+        assert "logic_preview" in data
+
+    def test_preview_non_hybrid(self):
+        r = client.get("/api/nodes/UPDATE_AGGREGATES/split-preview")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["can_split"] is False
+
+
+class TestSplitUnsplit:
+
+    def test_split_and_unsplit(self):
+        r = client.post(
+            "/api/nodes/REFRESH_INVENTORY/split",
+            json={"user": "test"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["original_hidden"] is True
+        assert len(data["created_nodes"]) >= 2
+
+        vn = client.get("/api/virtual-nodes")
+        assert vn.status_code == 200
+        nodes = vn.json()
+        assert len(nodes) >= 2
+
+        r2 = client.post(
+            "/api/nodes/REFRESH_INVENTORY/unsplit",
+            json={"user": "test"},
+        )
+        assert r2.status_code == 200
+
+        vn2 = client.get("/api/virtual-nodes")
+        assert len(vn2.json()) == 0
+
+    def test_split_nonexistent(self):
+        r = client.post(
+            "/api/nodes/NONEXISTENT/split",
+            json={"user": "test"},
+        )
+        assert r.status_code == 404
 
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("Phase 2 - Virtual Splitting Test Suite")
-    print("=" * 60)
-    
-    try:
-        # Test 1: Preview
-        sp_name = test_split_preview()
-        
-        if sp_name:
-            # Test 2: Split
-            if test_split(sp_name):
-                # Test 3: List virtual nodes
-                test_list_virtual_nodes()
-                
-                # Test 4: Merged list
-                test_merged_list()
-                
-                # Test 5: Unsplit
-                test_unsplit(sp_name)
-                
-                # Verify cleanup
-                test_list_virtual_nodes()
-        
-        print("\n" + "=" * 60)
-        print("✓ All tests completed!")
-        print("=" * 60)
-        
-    except requests.exceptions.ConnectionError:
-        print("\n✗ Error: Server not running!")
-        print("Start server with: uvicorn backend.main:app --reload")
-    except Exception as e:
-        print(f"\n✗ Error: {e}")
+    pytest.main([__file__, "-v"])
