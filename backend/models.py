@@ -1,82 +1,89 @@
 """
-SQLAlchemy database models
+SQLAlchemy database models — generalized for procedures, views, and tables.
 """
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float
 from sqlalchemy.sql import func
 from backend.database import Base
 
 
-class SourceSP(Base):
-    """Immutable - Original data from Snowflake"""
-    __tablename__ = "source_sps"
+class SourceObject(Base):
+    """Immutable — original DDL/metadata extracted from Snowflake."""
+    __tablename__ = "source_objects"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(255), unique=True, nullable=False, index=True)
+    name = Column(String(255), nullable=False, index=True)
+    object_type = Column(String(30), nullable=False, index=True)  # procedure, view, table
+    schema_name = Column(String(255))
     ddl = Column(Text)
-    category = Column(String(50))  # Auto-classified
+    category = Column(String(50))
     reason = Column(Text)
     loc = Column(Integer, default=0)
-    calls = Column(Text)  # JSON array as string
+    calls = Column(Text)        # JSON array — procedures called
     called_by = Column(Integer, default=0)
-    target_tables = Column(Text)  # JSON array as string
-    dependencies = Column(Text)  # JSON array as string
-    source_hash = Column(String(64))  # SHA256 of DDL for change detection
+    target_tables = Column(Text) # JSON array — tables written to
+    dependencies = Column(Text)  # JSON array — tables/views read from
+    source_hash = Column(String(64))
     imported_at = Column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        # unique per (schema, name, type)
+        {"sqlite_autoincrement": True},
+    )
 
 
 class MigrationState(Base):
-    """Mutable - User edits for each source SP"""
+    """Mutable — user edits for each source object."""
     __tablename__ = "migration_state"
 
     id = Column(Integer, primary_key=True, index=True)
-    source_sp_id = Column(Integer, ForeignKey("source_sps.id"), nullable=False)
+    source_object_id = Column(Integer, ForeignKey("source_objects.id"), nullable=False)
     status = Column(String(50), default="Not Started")
     notes = Column(Text)
-    assigned_dag = Column(String(255))  # FK to dag_groups.name
-    is_hidden = Column(Boolean, default=False)  # For split nodes
+    assigned_dag = Column(String(255))
+    is_hidden = Column(Boolean, default=False)
     updated_by = Column(String(100))
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
 class VirtualNode(Base):
-    """User-created nodes that don't exist in Snowflake"""
+    """User-created nodes that don't exist in Snowflake."""
     __tablename__ = "virtual_nodes"
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False, index=True)
-    node_type = Column(String(50))  # 'orchestrator', 'transformation'
-    parent_sp_id = Column(Integer, ForeignKey("source_sps.id"))  # Original SP
-    inherited_calls = Column(Text)  # JSON array - for _ORCH nodes
-    inherited_tables = Column(Text)  # JSON array - for _LOGIC nodes
+    node_type = Column(String(50))
+    parent_object_id = Column(Integer, ForeignKey("source_objects.id"))
+    inherited_calls = Column(Text)
+    inherited_tables = Column(Text)
     assigned_dag = Column(String(255))
-    position_x = Column(Float)  # Graph position
+    position_x = Column(Float)
     position_y = Column(Float)
     created_by = Column(String(100))
     created_at = Column(DateTime, server_default=func.now())
 
 
 class DAGGroup(Base):
-    """User-defined DAG containers"""
+    """User-defined DAG containers."""
     __tablename__ = "dag_groups"
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), unique=True, nullable=False, index=True)
-    color = Column(String(7))  # Hex color
+    color = Column(String(7))
     description = Column(Text)
-    execution_order = Column(Text)  # JSON array of node IDs in order
+    execution_order = Column(Text)
     created_by = Column(String(100))
     created_at = Column(DateTime, server_default=func.now())
 
 
 class ChangeLog(Base):
-    """Undo/history support"""
+    """Audit trail for all user actions."""
     __tablename__ = "change_log"
 
     id = Column(Integer, primary_key=True, index=True)
-    action = Column(String(50))  # 'split', 'group', 'status', 'hide'
-    entity_type = Column(String(50))  # 'source_sp', 'virtual_node', 'dag_group'
+    action = Column(String(50))
+    entity_type = Column(String(50))
     entity_id = Column(Integer)
-    old_state = Column(Text)  # JSON snapshot
-    new_state = Column(Text)  # JSON snapshot
+    old_state = Column(Text)
+    new_state = Column(Text)
     user = Column(String(100))
     timestamp = Column(DateTime, server_default=func.now())
