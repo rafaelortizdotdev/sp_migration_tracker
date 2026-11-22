@@ -184,7 +184,7 @@ def _insert_object(db, analysis: dict):
 
 
 if __name__ == "__main__":
-    path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "data", "sp_output.json")
+    path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "data", "lab_dataset.json")
     if not os.path.exists(path):
         print(f"[ERROR] File not found: {path}")
         sys.exit(1)
