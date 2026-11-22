@@ -29,21 +29,21 @@ def setup_db():
     proc = SourceObject(
         name="LOAD_SALES",
         object_type="procedure",
-        schema_name="DWINV",
+        schema_name="DW",
         ddl="INSERT INTO FACT_SALES SELECT * FROM RAW_SALES;",
         category="Transformation",
         reason="Pure SQL",
         loc=1,
         calls="[]",
         called_by=0,
-        target_tables='["DWINV.FACT_SALES"]',
+        target_tables='["DW.FACT_SALES"]',
         dependencies='["RAW_SALES"]',
         source_hash="abc123",
     )
     view = SourceObject(
         name="V_ACTIVE_PRODUCTS",
         object_type="view",
-        schema_name="DWINV",
+        schema_name="DW",
         ddl="CREATE VIEW V_ACTIVE_PRODUCTS AS SELECT * FROM PRODUCTS WHERE active=1;",
         category="Simple View",
         reason="Direct select",
@@ -57,7 +57,7 @@ def setup_db():
     table = SourceObject(
         name="FACT_SALES",
         object_type="table",
-        schema_name="DWINV",
+        schema_name="DW",
         category="Table",
         reason="Data table",
         loc=0,
@@ -133,6 +133,13 @@ class TestStatusUpdate:
         r2 = client.get("/api/objects/LOAD_SALES")
         assert r2.json()["migration_status"] == "In Progress"
 
+    def test_update_invalid_status(self):
+        r = client.patch(
+            "/api/objects/LOAD_SALES/status",
+            json={"status": "InvalidStatus"},
+        )
+        assert r.status_code == 422
+
     def test_update_missing(self):
         r = client.patch(
             "/api/objects/NONEXISTENT/status",
@@ -160,6 +167,8 @@ class TestEdges:
         assert r.status_code == 200
         data = r.json()
         assert isinstance(data, list)
+        edge_types = {e["type"] for e in data}
+        assert edge_types <= {"calls", "writes_to", "reads_from"}
 
 
 class TestBackwardCompat:

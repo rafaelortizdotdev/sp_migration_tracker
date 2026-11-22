@@ -57,7 +57,7 @@ async def split_node(name: str, request: SplitRequest, db: Session = Depends(get
     warnings = []
 
     if obj.category != "Hybrid":
-        warnings.append(f"Object is '{obj.category}', not 'Hybrid'. Split may not be appropriate.")
+        raise HTTPException(status_code=400, detail=f"Only Hybrid procedures can be split. This object is '{obj.category}'.")
 
     orch = VirtualNode(
         name=f"{name}_ORCH",

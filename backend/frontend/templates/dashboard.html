@@ -4,10 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Migration Tracker</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script src="/static/vendor/d3.v7.min.js"></script>
+    <script src="/static/vendor/highlight.min.js"></script>
+    <script src="/static/vendor/highlight-sql.min.js"></script>
+    <link rel="stylesheet" href="/static/vendor/github-dark.min.css">
     <style>
         :root {
             --bg: #0f172a;
@@ -741,7 +741,7 @@ function initGraph(objects, edges, clusters) {
         g.selectAll('*').remove();
 
         const filteredEdges = edges.filter(e => {
-            if (e.type === 'depends_on' && !showDeps.checked) return false;
+            if ((e.type === 'reads_from' || e.type === 'writes_to') && !showDeps.checked) return false;
             return true;
         });
 
@@ -798,9 +798,9 @@ function initGraph(objects, edges, clusters) {
 
         const links = g.append('g').selectAll('line')
             .data(validEdges).enter().append('line')
-            .attr('stroke', d => d.type === 'depends_on' ? '#334155' : (d.type === 'cluster' ? '#1e293b' : '#475569'))
+            .attr('stroke', d => d.type === 'reads_from' ? '#334155' : d.type === 'writes_to' ? '#f59e0b' : (d.type === 'cluster' ? '#1e293b' : '#475569'))
             .attr('stroke-width', d => d.type === 'cluster' ? 0.5 : 1)
-            .attr('stroke-dasharray', d => d.type === 'depends_on' ? '3,3' : 'none');
+            .attr('stroke-dasharray', d => d.type === 'reads_from' ? '3,3' : 'none');
 
         const nodeG = g.append('g').selectAll('g')
             .data(nodes).enter().append('g')

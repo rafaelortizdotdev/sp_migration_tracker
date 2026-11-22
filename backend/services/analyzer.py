@@ -38,60 +38,77 @@ class SQLAnalyzer:
         )
         return match.group(1).strip() if match else ddl
 
+    @staticmethod
+    def _strip_comments(sql: str) -> str:
+        """Remove SQL single-line and block comments."""
+        sql = re.sub(r'--[^\n]*', '', sql)
+        sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)
+        # Snowflake JS-style comments inside $$ bodies
+        sql = re.sub(r'//[^\n]*', '', sql)
+        return sql
+
+    @staticmethod
+    def _collect_cte_names(stmts: List[exp.Expression]) -> Set[str]:
+        """Collect all CTE alias names so they can be excluded from table lists."""
+        names: Set[str] = set()
+        for stmt in stmts:
+            if stmt is None:
+                continue
+            for cte in stmt.find_all(exp.CTE):
+                if cte.alias:
+                    names.add(cte.alias.upper())
+        return names
+
     # -------------------------------------------------------------------
     # Table / view reference extraction (AST-based)
     # -------------------------------------------------------------------
 
     @classmethod
     def extract_read_tables(cls, ddl: str) -> List[str]:
-        """Extract all tables/views referenced in FROM / JOIN clauses."""
-        tables: Set[str] = set()
-        body = cls._extract_body_sql(ddl)
-        for stmt in cls._safe_parse(body):
+        """Extract tables/views read (FROM/JOIN), excluding write targets and CTEs."""
+        body = cls._strip_comments(cls._extract_body_sql(ddl))
+        stmts = cls._safe_parse(body)
+
+        all_tables: Set[str] = set()
+        cte_names = cls._collect_cte_names(stmts)
+
+        for stmt in stmts:
             if stmt is None:
                 continue
             for table in stmt.find_all(exp.Table):
                 name = cls._normalize_table(table)
-                if name:
-                    tables.add(name)
-        if not tables:
-            tables = cls._regex_extract_dependencies(ddl)
-        return sorted(tables)
+                if name and name.split(".")[-1] not in cte_names:
+                    all_tables.add(name)
+
+        if not all_tables:
+            all_tables = cls._regex_extract_dependencies(cls._strip_comments(ddl))
+
+        write_targets = set(cls.extract_write_tables(ddl))
+        read_only = all_tables - write_targets
+        return sorted(read_only)
 
     @classmethod
     def extract_write_tables(cls, ddl: str) -> List[str]:
-        """Extract tables that the SQL writes to (INSERT, UPDATE, DELETE, MERGE, TRUNCATE)."""
+        """Extract tables written to (INSERT, UPDATE, DELETE, MERGE, TRUNCATE).
+        Traverses the full AST tree so nested statements inside BEGIN/IF are found."""
         tables: Set[str] = set()
-        body = cls._extract_body_sql(ddl)
-        for stmt in cls._safe_parse(body):
+        body = cls._strip_comments(cls._extract_body_sql(ddl))
+        stmts = cls._safe_parse(body)
+
+        write_types = (exp.Insert, exp.Merge, exp.Update, exp.Delete, exp.Drop)
+
+        for stmt in stmts:
             if stmt is None:
                 continue
-            if isinstance(stmt, (exp.Insert, exp.Merge)):
-                tgt = stmt.find(exp.Table)
+            for node in stmt.find_all(*write_types):
+                tgt = node.find(exp.Table)
                 if tgt:
                     name = cls._normalize_table(tgt)
                     if name:
                         tables.add(name)
-            elif isinstance(stmt, exp.Update):
-                tgt = stmt.find(exp.Table)
-                if tgt:
-                    name = cls._normalize_table(tgt)
-                    if name:
-                        tables.add(name)
-            elif isinstance(stmt, exp.Delete):
-                tgt = stmt.find(exp.Table)
-                if tgt:
-                    name = cls._normalize_table(tgt)
-                    if name:
-                        tables.add(name)
-            elif isinstance(stmt, exp.Drop):
-                tgt = stmt.find(exp.Table)
-                if tgt:
-                    name = cls._normalize_table(tgt)
-                    if name:
-                        tables.add(name)
+
         if not tables:
-            tables = cls._regex_extract_targets(ddl)
+            tables = cls._regex_extract_targets(cls._strip_comments(ddl))
         return sorted(tables)
 
     @staticmethod
@@ -102,7 +119,7 @@ class SQLAnalyzer:
             parts.append(table.args["db"].name.upper())
         parts.append(table.name.upper())
         result = ".".join(parts)
-        skip = {"DUAL", "VALUES", "RESULT_SCAN", "TABLE", "INFORMATION_SCHEMA"}
+        skip = {"DUAL", "VALUES", "RESULT_SCAN", "TABLE", "INFORMATION_SCHEMA", "SET", ""}
         if result in skip or result.startswith("$"):
             return None
         return result
@@ -113,9 +130,10 @@ class SQLAnalyzer:
 
     @classmethod
     def extract_calls(cls, ddl: str, known_names: List[str]) -> List[str]:
-        """Extract CALL references, resolved against the known inventory."""
+        """Extract CALL references, resolved against the known inventory.
+        Uses exact match only — no substring matching."""
         raw: Set[str] = set()
-        body = cls._extract_body_sql(ddl)
+        body = cls._strip_comments(cls._extract_body_sql(ddl))
         for stmt in cls._safe_parse(body):
             if stmt is None:
                 continue
@@ -123,8 +141,8 @@ class SQLAnalyzer:
                 if cmd.this and cmd.this.upper() == "CALL":
                     if cmd.expression:
                         raw.add(cmd.expression.name.upper() if hasattr(cmd.expression, 'name') else str(cmd.expression).split('(')[0].strip().upper())
-        # Regex fallback
-        for m in re.finditer(r'\bCALL\s+([A-Za-z0-9_."]+)', ddl, re.IGNORECASE):
+        # Regex fallback on comment-stripped body
+        for m in re.finditer(r'\bCALL\s+([A-Za-z0-9_."]+)', body, re.IGNORECASE):
             name = m.group(1).split(".")[-1].strip('"').upper()
             raw.add(name)
 
@@ -133,11 +151,6 @@ class SQLAnalyzer:
         for name in raw:
             if name in known_upper:
                 resolved.append(known_upper[name])
-            else:
-                for known in known_upper:
-                    if name in known:
-                        resolved.append(known_upper[known])
-                        break
         return sorted(set(resolved))
 
     # -------------------------------------------------------------------
@@ -148,7 +161,10 @@ class SQLAnalyzer:
     def extract_view_sources(cls, ddl: str) -> List[str]:
         """For CREATE VIEW, extract all tables/views the view selects from."""
         tables: Set[str] = set()
-        for stmt in cls._safe_parse(ddl):
+        stmts = cls._safe_parse(ddl)
+        cte_names = cls._collect_cte_names(stmts)
+
+        for stmt in stmts:
             if stmt is None:
                 continue
             if isinstance(stmt, exp.Create):
@@ -156,7 +172,7 @@ class SQLAnalyzer:
                 if query:
                     for table in query.find_all(exp.Table):
                         name = cls._normalize_table(table)
-                        if name:
+                        if name and name.split(".")[-1] not in cte_names:
                             tables.add(name)
         if not tables:
             tables = cls._regex_extract_dependencies(ddl)
@@ -185,16 +201,18 @@ class SQLAnalyzer:
         called_by_count: int,
     ) -> Tuple[str, str]:
         """Classify a stored procedure into one of 7 categories."""
-        body = cls._extract_body_sql(ddl)
+        body = cls._strip_comments(cls._extract_body_sql(ddl))
         sql_ops = cls._count_sql_ops(body)
 
-        has_control = bool(re.search(r'\bCONTROL\b|\bETL_|\bBATCH_ID|\bJOB_ID', ddl, re.IGNORECASE))
-        has_legacy = bool(re.search(r'\b(?:_DEV|_BAK|JUNK)\b', ddl, re.IGNORECASE))
+        has_control = bool(re.search(r'\bCONTROL\b|\bETL_|\bBATCH_ID|\bJOB_ID', body, re.IGNORECASE))
+        has_legacy = bool(re.search(r'(?:_DEV|_BAK|JUNK)', ddl, re.IGNORECASE))
         has_scheduler_kw = bool(re.search(r'REFRESH|BATCH|DAILY|SYNC|LOAD_ALL|SCHEDULER', name, re.IGNORECASE))
 
         is_root = call_count > 0 and called_by_count == 0
         is_utility = called_by_count >= 2 and call_count == 0
 
+        if has_legacy and sql_ops == 0 and call_count == 0:
+            return "Legacy", "Contains DEV/BAK/JUNK schema references"
         if has_control and (has_scheduler_kw or is_root):
             return "ETL Control", "Manages job state, batch IDs, or scheduling"
         if is_root and has_scheduler_kw:
@@ -217,6 +235,14 @@ class SQLAnalyzer:
     @classmethod
     def classify_view(cls, name: str, ddl: str, dep_count: int) -> Tuple[str, str]:
         """Classify a view based on its query structure."""
+        is_mat = bool(re.search(r'\bMATERIALIZED\b', ddl, re.IGNORECASE))
+        has_legacy = bool(re.search(r'(?:_DEV|_BAK|JUNK)', ddl, re.IGNORECASE))
+
+        if has_legacy:
+            return "Legacy", "References DEV/BAK/JUNK schemas"
+        if is_mat:
+            return "Materialized", "Materialized view"
+
         stmts = cls._safe_parse(ddl)
         create = next((s for s in stmts if s and isinstance(s, exp.Create)), None)
         if not create or not create.expression:
@@ -228,13 +254,6 @@ class SQLAnalyzer:
         has_subquery = bool(query.find(exp.Subquery))
         has_cte = bool(query.find(exp.CTE))
 
-        is_mat = bool(re.search(r'\bMATERIALIZED\b', ddl, re.IGNORECASE))
-        has_legacy = bool(re.search(r'\b(?:_DEV|_BAK|JUNK)\b', ddl, re.IGNORECASE))
-
-        if has_legacy:
-            return "Legacy", "References DEV/BAK/JUNK schemas"
-        if is_mat:
-            return "Materialized", "Materialized view"
         if has_subquery or has_cte:
             return "Nested View", f"Contains subqueries or CTEs ({dep_count} dependencies)"
         if has_join and has_agg:
@@ -339,7 +358,7 @@ class SQLAnalyzer:
         patterns = [
             r'INSERT\s+INTO\s+([a-zA-Z0-9_."]+)',
             r'MERGE\s+INTO\s+([a-zA-Z0-9_."]+)',
-            r'UPDATE\s+([a-zA-Z0-9_."]+)\s+(?:SET|[A-Z])',
+            r'UPDATE\s+([a-zA-Z0-9_."]+)\s+SET\b',
             r'DELETE\s+FROM\s+([a-zA-Z0-9_."]+)',
             r'TRUNCATE\s+(?:TABLE\s+)?([a-zA-Z0-9_."]+)',
         ]
@@ -354,8 +373,9 @@ class SQLAnalyzer:
 
     @staticmethod
     def _regex_extract_dependencies(ddl: str) -> Set[str]:
-        skip = {"SELECT", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "TABLE", "VALUES", "SET", "LATERAL"}
-        tables = re.findall(r'(?:FROM|JOIN|UPDATE|INTO|TABLE)\s+([a-zA-Z0-9_."]+)', ddl, re.IGNORECASE)
+        skip = {"SELECT", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT",
+                "TABLE", "VALUES", "SET", "LATERAL", ""}
+        tables = re.findall(r'(?:FROM|JOIN)\s+([a-zA-Z0-9_."]+)', ddl, re.IGNORECASE)
         return {t.strip().upper() for t in tables if t.strip().upper() not in skip}
 
     # -------------------------------------------------------------------
@@ -372,5 +392,9 @@ class SQLAnalyzer:
 
     @staticmethod
     def _count_sql_ops(body: str) -> int:
-        ops = ["INSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE", "CREATE TABLE"]
-        return sum(len(re.findall(r"\b" + op + r"\b", body, re.IGNORECASE)) for op in ops)
+        """Count distinct SQL write operations. Each statement type counted once per occurrence."""
+        count = 0
+        for op in ["INSERT\\s+INTO", "UPDATE\\s+\\w", "DELETE\\s+FROM",
+                    "MERGE\\s+INTO", "TRUNCATE", "CREATE\\s+TABLE"]:
+            count += len(re.findall(op, body, re.IGNORECASE))
+        return count

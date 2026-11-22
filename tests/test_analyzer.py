@@ -23,10 +23,10 @@ class TestProcedureClassification:
         RETURNS STRING
         LANGUAGE SQL
         AS $$
-        INSERT INTO DWINV.FACT_SALES (product_id, qty, sale_date)
+        INSERT INTO DW.FACT_SALES (product_id, qty, sale_date)
         SELECT p.id, s.quantity, s.sale_date
         FROM STAGING.RAW_SALES s
-        JOIN DWINV.DIM_PRODUCT p ON s.sku = p.sku;
+        JOIN DW.DIM_PRODUCT p ON s.sku = p.sku;
         $$;
         """
         result = SQLAnalyzer.analyze_procedure("LOAD_FACT_SALES", ddl, [])
@@ -54,8 +54,8 @@ class TestProcedureClassification:
         RETURNS STRING
         LANGUAGE SQL
         AS $$
-        TRUNCATE TABLE DWINV.FACT_INV;
-        INSERT INTO DWINV.FACT_INV SELECT * FROM STAGING.INV_SNAPSHOT;
+        TRUNCATE TABLE DW.FACT_INV;
+        INSERT INTO DW.FACT_INV SELECT * FROM STAGING.INV_SNAPSHOT;
         CALL UPDATE_AGGREGATES();
         $$;
         """
@@ -125,16 +125,85 @@ class TestDependencyExtraction:
     def test_extract_write_tables(self):
         ddl = """
         AS $$
-        INSERT INTO DWINV.FACT_SALES (col1) SELECT col1 FROM STAGING.RAW;
-        UPDATE DWINV.DIM_DATE SET is_current = 0;
+        INSERT INTO DW.FACT_SALES (col1) SELECT col1 FROM STAGING.RAW;
+        UPDATE DW.DIM_DATE SET is_current = 0;
         DELETE FROM STAGING.TEMP_TABLE WHERE processed = 1;
         $$
         """
         targets = SQLAnalyzer.extract_write_tables(ddl)
         names = [t.upper() for t in targets]
-        assert "DWINV.FACT_SALES" in names
-        assert "DWINV.DIM_DATE" in names
+        assert "DW.FACT_SALES" in names
+        assert "DW.DIM_DATE" in names
         assert "STAGING.TEMP_TABLE" in names
+
+    def test_read_tables_excludes_write_targets(self):
+        ddl = """
+        AS $$
+        INSERT INTO DW.FACT_SALES SELECT * FROM STAGING.RAW_SALES;
+        $$
+        """
+        reads = SQLAnalyzer.extract_read_tables(ddl)
+        writes = SQLAnalyzer.extract_write_tables(ddl)
+        read_names = [t.upper() for t in reads]
+        write_names = [t.upper() for t in writes]
+        assert "DW.FACT_SALES" in write_names
+        assert "DW.FACT_SALES" not in read_names
+        assert "STAGING.RAW_SALES" in read_names
+
+    def test_cte_names_excluded_from_reads(self):
+        ddl = """
+        AS $$
+        WITH staging_cte AS (
+            SELECT id, amount FROM STAGING.RAW_SALES
+        )
+        INSERT INTO DW.FACT_SALES SELECT * FROM staging_cte;
+        $$
+        """
+        reads = SQLAnalyzer.extract_read_tables(ddl)
+        read_names = [t.upper() for t in reads]
+        assert "STAGING_CTE" not in read_names
+        assert "STAGING.RAW_SALES" in read_names
+
+    def test_comment_stripping(self):
+        ddl = """
+        AS $$
+        -- CALL OLD_PROC();
+        /* INSERT INTO JUNK.TABLE1 SELECT 1; */
+        INSERT INTO DW.FACT_SALES SELECT * FROM STAGING.RAW;
+        $$
+        """
+        writes = SQLAnalyzer.extract_write_tables(ddl)
+        write_names = [t.upper() for t in writes]
+        assert "DW.FACT_SALES" in write_names
+        assert "JUNK.TABLE1" not in write_names
+
+    def test_deep_nested_writes(self):
+        ddl = """
+        CREATE OR REPLACE PROCEDURE NESTED_PROC()
+        RETURNS STRING LANGUAGE SQL
+        AS $$
+        BEGIN
+            IF (TRUE) THEN
+                INSERT INTO DW.INNER_TABLE SELECT * FROM STAGING.SRC;
+            END IF;
+        END;
+        $$;
+        """
+        writes = SQLAnalyzer.extract_write_tables(ddl)
+        write_names = [t.upper() for t in writes]
+        assert "DW.INNER_TABLE" in write_names
+
+    def test_extract_calls_exact_match(self):
+        ddl = """
+        AS $$
+        CALL LOAD_DATA();
+        $$
+        """
+        known = ["LOAD_DATA", "LOAD_DATA_FULL", "PRELOAD_DATA"]
+        calls = SQLAnalyzer.extract_calls(ddl, known)
+        assert "LOAD_DATA" in calls
+        assert "LOAD_DATA_FULL" not in calls
+        assert "PRELOAD_DATA" not in calls
 
     def test_extract_calls_resolves_known(self):
         ddl = """
@@ -203,6 +272,11 @@ class TestViewClassification:
         """
         result = SQLAnalyzer.analyze_view("V_TOP_CUSTOMERS", ddl)
         assert result["category"] == "Nested View"
+
+    def test_materialized_view(self):
+        ddl = "CREATE MATERIALIZED VIEW MV_DAILY AS SELECT day, SUM(amt) FROM SALES GROUP BY day;"
+        result = SQLAnalyzer.analyze_view("MV_DAILY", ddl)
+        assert result["category"] == "Materialized"
 
     def test_legacy_view(self):
         ddl = "CREATE VIEW V_OLD AS SELECT * FROM JUNK.TEMP_DATA;"

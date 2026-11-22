@@ -37,6 +37,9 @@ class ObjectDetailResponse(ObjectResponse):
     ddl: str
 
 
+VALID_STATUSES = {"Not Started", "In Progress", "Migrated", "Blocked", "Deprecated"}
+
+
 class StatusUpdate(BaseModel):
     status: str
     notes: Optional[str] = None
@@ -141,6 +144,9 @@ async def get_object(name: str, db: Session = Depends(get_db)):
 
 @router.patch("/objects/{name}/status")
 async def update_status(name: str, update: StatusUpdate, db: Session = Depends(get_db)):
+    if update.status not in VALID_STATUSES:
+        raise HTTPException(status_code=422, detail=f"Invalid status '{update.status}'. Must be one of: {', '.join(sorted(VALID_STATUSES))}")
+
     obj = db.query(SourceObject).filter(SourceObject.name == name).first()
     if not obj:
         raise HTTPException(status_code=404, detail="Object not found")
@@ -212,12 +218,19 @@ async def get_edges(db: Session = Depends(get_db)):
             if clean in name_map:
                 edges.append({"source": obj.name, "target": name_map[clean], "type": "calls"})
 
-        # Dependency edges (reads from)
+        # Write edges (writes to)
+        targets = _json_load(obj.target_tables)
+        for tgt in targets:
+            clean = tgt.split(".")[-1].strip('"').upper()
+            if clean in name_map:
+                edges.append({"source": obj.name, "target": name_map[clean], "type": "writes_to"})
+
+        # Read dependency edges
         deps = _json_load(obj.dependencies)
         for dep in deps:
             clean = dep.split(".")[-1].strip('"').upper()
             if clean in name_map:
-                edges.append({"source": obj.name, "target": name_map[clean], "type": "depends_on"})
+                edges.append({"source": obj.name, "target": name_map[clean], "type": "reads_from"})
 
     return edges
 

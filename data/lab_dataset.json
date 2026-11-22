@@ -155,6 +155,12 @@
     "ddl": "CREATE VIEW LAB_DB.DW.V_RETURN_ANALYSIS AS\nWITH return_rates AS (\n  SELECT\n    p.product_id,\n    p.product_name,\n    p.category_name,\n    COUNT(DISTINCT r.return_id) AS return_count,\n    COUNT(DISTINCT f.sale_id) AS sale_count,\n    SUM(r.refund_amount) AS total_refunds\n  FROM DW.FACT_SALES f\n  LEFT JOIN DW.FACT_RETURNS r ON f.sale_id = r.sale_id\n  JOIN DW.DIM_PRODUCT p ON f.product_id = p.product_id\n  GROUP BY p.product_id, p.product_name, p.category_name\n)\nSELECT\n  *,\n  ROUND(return_count * 100.0 / NULLIF(sale_count, 0), 2) AS return_rate_pct\nFROM return_rates;"
   },
   {
+    "name": "MV_MONTHLY_REVENUE",
+    "object_type": "view",
+    "schema_name": "DW",
+    "ddl": "CREATE MATERIALIZED VIEW LAB_DB.DW.MV_MONTHLY_REVENUE AS\nSELECT\n  d.year_num,\n  d.month_num,\n  SUM(f.total_amount) AS monthly_revenue,\n  COUNT(DISTINCT f.sale_id) AS transaction_count\nFROM DW.FACT_SALES f\nJOIN DW.DIM_DATE d ON f.date_key = d.date_key\nGROUP BY d.year_num, d.month_num;"
+  },
+  {
     "name": "V_OLD_DEV_SCRATCH",
     "object_type": "view",
     "schema_name": "DW_DEV",

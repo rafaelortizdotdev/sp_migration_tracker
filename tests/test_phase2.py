@@ -107,6 +107,14 @@ class TestSplitUnsplit:
         vn2 = client.get("/api/virtual-nodes")
         assert len(vn2.json()) == 0
 
+    def test_split_non_hybrid_rejected(self):
+        r = client.post(
+            "/api/nodes/UPDATE_AGGREGATES/split",
+            json={"user": "test"},
+        )
+        assert r.status_code == 400
+        assert "Hybrid" in r.json()["detail"]
+
     def test_split_nonexistent(self):
         r = client.post(
             "/api/nodes/NONEXISTENT/split",
