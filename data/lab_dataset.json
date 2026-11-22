@@ -1,0 +1,267 @@
+[
+  {"comment": "=== PROCEDURES: covers all 7 classification categories ==="},
+
+  {
+    "name": "SP_RUN_NIGHTLY_ETL",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_RUN_NIGHTLY_ETL()\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nCALL DW.SP_LOAD_DIM_STORE();\nCALL DW.SP_LOAD_DIM_PRODUCT();\nCALL DW.SP_LOAD_DIM_DATE();\nCALL DW.SP_LOAD_FACT_SALES();\nCALL DW.SP_LOAD_FACT_INVENTORY();\nCALL DW.SP_REFRESH_AGGREGATES();\n$$;"
+  },
+  {
+    "name": "SP_LOAD_DIM_STORE",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_LOAD_DIM_STORE(\"BATCH_ID\" VARCHAR)\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nMERGE INTO DW.DIM_STORE tgt\nUSING (\n  SELECT\n    s.store_id,\n    s.store_name,\n    s.city,\n    s.state_code,\n    s.country_code,\n    r.region_name,\n    s.open_date,\n    s.close_date,\n    s.store_type,\n    s.square_footage\n  FROM STAGING.RAW_STORES s\n  LEFT JOIN DW.LKP_REGION r ON s.region_id = r.region_id\n) src\nON tgt.store_id = src.store_id\nWHEN MATCHED THEN UPDATE SET\n  tgt.store_name = src.store_name,\n  tgt.city = src.city,\n  tgt.state_code = src.state_code,\n  tgt.country_code = src.country_code,\n  tgt.region_name = src.region_name,\n  tgt.close_date = src.close_date,\n  tgt.store_type = src.store_type,\n  tgt.square_footage = src.square_footage,\n  tgt.etl_updated_at = CURRENT_TIMESTAMP()\nWHEN NOT MATCHED THEN INSERT (\n  store_id, store_name, city, state_code, country_code,\n  region_name, open_date, close_date, store_type,\n  square_footage, etl_created_at\n) VALUES (\n  src.store_id, src.store_name, src.city, src.state_code,\n  src.country_code, src.region_name, src.open_date,\n  src.close_date, src.store_type, src.square_footage,\n  CURRENT_TIMESTAMP()\n);\n$$;"
+  },
+  {
+    "name": "SP_LOAD_DIM_PRODUCT",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_LOAD_DIM_PRODUCT(\"BATCH_ID\" VARCHAR)\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nMERGE INTO DW.DIM_PRODUCT tgt\nUSING (\n  SELECT\n    p.product_id,\n    p.sku,\n    p.product_name,\n    p.brand,\n    c.category_name,\n    c.subcategory_name,\n    p.unit_cost,\n    p.unit_price,\n    p.is_active\n  FROM STAGING.RAW_PRODUCTS p\n  LEFT JOIN STAGING.RAW_CATEGORIES c ON p.category_id = c.category_id\n) src\nON tgt.product_id = src.product_id\nWHEN MATCHED THEN UPDATE SET\n  tgt.product_name = src.product_name,\n  tgt.brand = src.brand,\n  tgt.category_name = src.category_name,\n  tgt.subcategory_name = src.subcategory_name,\n  tgt.unit_cost = src.unit_cost,\n  tgt.unit_price = src.unit_price,\n  tgt.is_active = src.is_active,\n  tgt.etl_updated_at = CURRENT_TIMESTAMP()\nWHEN NOT MATCHED THEN INSERT (\n  product_id, sku, product_name, brand, category_name,\n  subcategory_name, unit_cost, unit_price, is_active, etl_created_at\n) VALUES (\n  src.product_id, src.sku, src.product_name, src.brand,\n  src.category_name, src.subcategory_name, src.unit_cost,\n  src.unit_price, src.is_active, CURRENT_TIMESTAMP()\n);\n$$;"
+  },
+  {
+    "name": "SP_LOAD_DIM_DATE",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_LOAD_DIM_DATE()\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nINSERT INTO DW.DIM_DATE (day_date, year_num, quarter_num, month_num, week_num, day_of_week, is_weekend, fiscal_year, fiscal_quarter)\nSELECT\n  d.day_date,\n  YEAR(d.day_date),\n  QUARTER(d.day_date),\n  MONTH(d.day_date),\n  WEEKOFYEAR(d.day_date),\n  DAYOFWEEK(d.day_date),\n  CASE WHEN DAYOFWEEK(d.day_date) IN (0, 6) THEN TRUE ELSE FALSE END,\n  CASE WHEN MONTH(d.day_date) >= 7 THEN YEAR(d.day_date) + 1 ELSE YEAR(d.day_date) END,\n  CASE WHEN MONTH(d.day_date) >= 7 THEN QUARTER(d.day_date) - 2 ELSE QUARTER(d.day_date) + 2 END\nFROM (\n  SELECT DATEADD(DAY, SEQ4(), '2020-01-01')::DATE AS day_date\n  FROM TABLE(GENERATOR(ROWCOUNT => 3650))\n) d\nWHERE d.day_date NOT IN (SELECT day_date FROM DW.DIM_DATE);\n$$;"
+  },
+  {
+    "name": "SP_LOAD_FACT_SALES",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_LOAD_FACT_SALES(\"BATCH_ID\" VARCHAR)\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nINSERT INTO DW.FACT_SALES (\n  sale_id, store_id, product_id, date_key, quantity,\n  unit_price, discount_pct, net_amount, tax_amount,\n  total_amount, etl_batch_id, etl_created_at\n)\nSELECT\n  s.transaction_id,\n  d_store.store_id,\n  d_prod.product_id,\n  d_date.date_key,\n  s.quantity,\n  s.unit_price,\n  COALESCE(s.discount_pct, 0),\n  s.quantity * s.unit_price * (1 - COALESCE(s.discount_pct, 0) / 100),\n  s.tax_amount,\n  s.quantity * s.unit_price * (1 - COALESCE(s.discount_pct, 0) / 100) + s.tax_amount,\n  :batch_id,\n  CURRENT_TIMESTAMP()\nFROM STAGING.RAW_TRANSACTIONS s\nJOIN DW.DIM_STORE d_store ON s.store_code = d_store.store_id\nJOIN DW.DIM_PRODUCT d_prod ON s.sku = d_prod.sku\nJOIN DW.DIM_DATE d_date ON s.sale_date = d_date.day_date\nWHERE s.transaction_id NOT IN (SELECT sale_id FROM DW.FACT_SALES);\n$$;"
+  },
+  {
+    "name": "SP_LOAD_FACT_INVENTORY",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_LOAD_FACT_INVENTORY(\"BATCH_ID\" VARCHAR)\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nTRUNCATE TABLE DW.FACT_INVENTORY;\nINSERT INTO DW.FACT_INVENTORY (\n  snapshot_date, store_id, product_id, quantity_on_hand,\n  quantity_on_order, reorder_point, days_of_supply, etl_batch_id\n)\nSELECT\n  i.snapshot_date,\n  i.store_id,\n  i.product_id,\n  i.qty_on_hand,\n  i.qty_on_order,\n  i.reorder_point,\n  CASE WHEN avg_daily.avg_qty > 0\n    THEN i.qty_on_hand / avg_daily.avg_qty\n    ELSE 999\n  END AS days_of_supply,\n  :batch_id\nFROM STAGING.RAW_INVENTORY i\nLEFT JOIN (\n  SELECT product_id, store_id, AVG(quantity) AS avg_qty\n  FROM DW.FACT_SALES\n  WHERE date_key >= DATEADD(DAY, -30, CURRENT_DATE())\n  GROUP BY product_id, store_id\n) avg_daily ON i.product_id = avg_daily.product_id AND i.store_id = avg_daily.store_id;\n$$;"
+  },
+  {
+    "name": "SP_REFRESH_AGGREGATES",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_REFRESH_AGGREGATES()\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nTRUNCATE TABLE DW.AGG_DAILY_SALES;\nINSERT INTO DW.AGG_DAILY_SALES (day_date, store_id, total_sales, total_qty, avg_ticket)\nSELECT\n  d.day_date,\n  f.store_id,\n  SUM(f.total_amount),\n  SUM(f.quantity),\n  AVG(f.total_amount)\nFROM DW.FACT_SALES f\nJOIN DW.DIM_DATE d ON f.date_key = d.date_key\nGROUP BY d.day_date, f.store_id;\n\nCALL DW.SP_LOG_ETL_STATUS('AGG_DAILY_SALES refreshed');\n$$;"
+  },
+  {
+    "name": "SP_LOG_ETL_STATUS",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_LOG_ETL_STATUS(\"MSG\" VARCHAR)\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nINSERT INTO DW.ETL_LOG (log_message, log_timestamp, log_level)\nVALUES (:msg, CURRENT_TIMESTAMP(), 'INFO');\n$$;"
+  },
+  {
+    "name": "SP_VALIDATE_DATA",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_VALIDATE_DATA(\"TABLE_NAME\" VARCHAR)\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nINSERT INTO DW.VALIDATION_LOG (table_name, check_type, check_result, check_timestamp)\nSELECT :table_name, 'row_count', COUNT(*)::VARCHAR, CURRENT_TIMESTAMP()\nFROM DW.FACT_SALES;\n\nINSERT INTO DW.VALIDATION_LOG (table_name, check_type, check_result, check_timestamp)\nSELECT :table_name, 'null_check', COUNT(*)::VARCHAR, CURRENT_TIMESTAMP()\nFROM DW.FACT_SALES\nWHERE total_amount IS NULL;\n$$;"
+  },
+  {
+    "name": "SP_BATCH_CONTROLLER",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_BATCH_CONTROLLER()\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nUPDATE DW.ETL_BATCH SET status = 'RUNNING', started_at = CURRENT_TIMESTAMP() WHERE BATCH_ID = (SELECT MAX(BATCH_ID) FROM DW.ETL_BATCH);\nCALL DW.SP_RUN_NIGHTLY_ETL();\nCALL DW.SP_VALIDATE_DATA('FACT_SALES');\nUPDATE DW.ETL_BATCH SET status = 'COMPLETED', finished_at = CURRENT_TIMESTAMP() WHERE BATCH_ID = (SELECT MAX(BATCH_ID) FROM DW.ETL_BATCH WHERE status = 'RUNNING');\n$$;"
+  },
+  {
+    "name": "SP_ARCHIVE_OLD_DATA",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_ARCHIVE_OLD_DATA(\"CUTOFF_DATE\" DATE)\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nINSERT INTO ARCHIVE.FACT_SALES_HIST\nSELECT * FROM DW.FACT_SALES f\nJOIN DW.DIM_DATE d ON f.date_key = d.date_key\nWHERE d.day_date < :cutoff_date;\n\nDELETE FROM DW.FACT_SALES\nWHERE date_key IN (\n  SELECT date_key FROM DW.DIM_DATE WHERE day_date < :cutoff_date\n);\n\nCALL DW.SP_LOG_ETL_STATUS('Archive completed for dates before ' || :cutoff_date);\n$$;"
+  },
+  {
+    "name": "SP_CURRENCY_CONVERT",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_CURRENCY_CONVERT(\"TARGET_CURRENCY\" VARCHAR)\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nUPDATE DW.FACT_SALES f\nSET f.total_amount_usd = f.total_amount * r.exchange_rate,\n    f.currency_code = :target_currency\nFROM DW.LKP_EXCHANGE_RATES r\nWHERE f.currency_code = r.source_currency\n  AND r.target_currency = :target_currency\n  AND f.date_key BETWEEN r.effective_from AND r.effective_to;\n$$;"
+  },
+  {
+    "name": "SP_WEEKLY_RESTOCK_SYNC",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_WEEKLY_RESTOCK_SYNC()\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nCALL DW.SP_LOAD_FACT_INVENTORY('WEEKLY');\nCALL DW.SP_REFRESH_AGGREGATES();\nCALL DW.SP_LOG_ETL_STATUS('Weekly restock sync done');\n$$;"
+  },
+  {
+    "name": "SP_LOAD_PROMOTIONS",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_LOAD_PROMOTIONS()\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nMERGE INTO DW.DIM_PROMOTION tgt\nUSING STAGING.RAW_PROMOTIONS src\nON tgt.promo_id = src.promo_id\nWHEN MATCHED THEN UPDATE SET\n  tgt.promo_name = src.promo_name,\n  tgt.discount_type = src.discount_type,\n  tgt.discount_value = src.discount_value,\n  tgt.start_date = src.start_date,\n  tgt.end_date = src.end_date,\n  tgt.etl_updated_at = CURRENT_TIMESTAMP()\nWHEN NOT MATCHED THEN INSERT (\n  promo_id, promo_name, discount_type, discount_value,\n  start_date, end_date, etl_created_at\n) VALUES (\n  src.promo_id, src.promo_name, src.discount_type,\n  src.discount_value, src.start_date, src.end_date,\n  CURRENT_TIMESTAMP()\n);\n$$;"
+  },
+  {
+    "name": "SP_FIX_COGS_JUNK_DEV",
+    "object_type": "procedure",
+    "schema_name": "DW_DEV",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW_DEV.SP_FIX_COGS_JUNK_DEV()\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nUPDATE DW_DEV.FACT_SALES_BAK SET unit_cost = 0 WHERE unit_cost IS NULL;\nDELETE FROM DW_DEV.JUNK_TEMP WHERE created_at < '2022-01-01';\n$$;"
+  },
+  {
+    "name": "SP_REBUILD_INDEXES_BAK",
+    "object_type": "procedure",
+    "schema_name": "DW_DEV",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW_DEV.SP_REBUILD_INDEXES_BAK()\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nSELECT 'REBUILD' AS action FROM DW_DEV.TEMP_BAK_INDEXES;\n$$;"
+  },
+  {
+    "name": "SP_LOAD_RETURNS",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_LOAD_RETURNS(\"BATCH_ID\" VARCHAR)\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nINSERT INTO DW.FACT_RETURNS (\n  return_id, sale_id, store_id, product_id, return_date,\n  quantity, reason_code, refund_amount, etl_batch_id\n)\nSELECT\n  r.return_id,\n  r.original_sale_id,\n  r.store_id,\n  r.product_id,\n  r.return_date,\n  r.quantity,\n  r.reason_code,\n  r.refund_amount,\n  :batch_id\nFROM STAGING.RAW_RETURNS r\nWHERE r.return_id NOT IN (SELECT return_id FROM DW.FACT_RETURNS);\n$$;"
+  },
+  {
+    "name": "SP_FULL_REFRESH_DAILY",
+    "object_type": "procedure",
+    "schema_name": "DW",
+    "ddl": "CREATE OR REPLACE PROCEDURE LAB_DB.DW.SP_FULL_REFRESH_DAILY()\nRETURNS STRING\nLANGUAGE SQL\nEXECUTE AS CALLER\nAS $$\nCALL DW.SP_RUN_NIGHTLY_ETL();\nCALL DW.SP_LOAD_PROMOTIONS();\nCALL DW.SP_LOAD_RETURNS('DAILY');\nCALL DW.SP_ARCHIVE_OLD_DATA(DATEADD(YEAR, -3, CURRENT_DATE()));\n$$;"
+  },
+
+  {"comment": "=== VIEWS: covers all 6 classification categories ==="},
+
+  {
+    "name": "V_ACTIVE_STORES",
+    "object_type": "view",
+    "schema_name": "DW",
+    "ddl": "CREATE VIEW LAB_DB.DW.V_ACTIVE_STORES AS\nSELECT store_id, store_name, city, state_code, country_code, store_type\nFROM DW.DIM_STORE\nWHERE close_date IS NULL OR close_date > CURRENT_DATE();"
+  },
+  {
+    "name": "V_ACTIVE_PRODUCTS",
+    "object_type": "view",
+    "schema_name": "DW",
+    "ddl": "CREATE VIEW LAB_DB.DW.V_ACTIVE_PRODUCTS AS\nSELECT product_id, sku, product_name, brand, category_name, unit_price\nFROM DW.DIM_PRODUCT\nWHERE is_active = TRUE;"
+  },
+  {
+    "name": "V_SALES_BY_STORE",
+    "object_type": "view",
+    "schema_name": "DW",
+    "ddl": "CREATE VIEW LAB_DB.DW.V_SALES_BY_STORE AS\nSELECT\n  s.store_id,\n  st.store_name,\n  st.city,\n  st.country_code,\n  d.year_num,\n  d.month_num,\n  SUM(s.total_amount) AS total_revenue,\n  SUM(s.quantity) AS total_units,\n  COUNT(DISTINCT s.sale_id) AS transaction_count,\n  AVG(s.total_amount) AS avg_ticket_size\nFROM DW.FACT_SALES s\nJOIN DW.DIM_STORE st ON s.store_id = st.store_id\nJOIN DW.DIM_DATE d ON s.date_key = d.date_key\nGROUP BY s.store_id, st.store_name, st.city, st.country_code, d.year_num, d.month_num;"
+  },
+  {
+    "name": "V_PRODUCT_PERFORMANCE",
+    "object_type": "view",
+    "schema_name": "DW",
+    "ddl": "CREATE VIEW LAB_DB.DW.V_PRODUCT_PERFORMANCE AS\nSELECT\n  p.product_id,\n  p.product_name,\n  p.brand,\n  p.category_name,\n  SUM(f.total_amount) AS total_revenue,\n  SUM(f.quantity) AS total_units,\n  SUM(f.total_amount) - SUM(f.quantity * p.unit_cost) AS gross_margin\nFROM DW.FACT_SALES f\nJOIN DW.DIM_PRODUCT p ON f.product_id = p.product_id\nGROUP BY p.product_id, p.product_name, p.brand, p.category_name;"
+  },
+  {
+    "name": "V_TOP_SELLERS",
+    "object_type": "view",
+    "schema_name": "DW",
+    "ddl": "CREATE VIEW LAB_DB.DW.V_TOP_SELLERS AS\nWITH ranked_products AS (\n  SELECT\n    p.product_id,\n    p.product_name,\n    p.brand,\n    p.category_name,\n    SUM(f.total_amount) AS total_revenue,\n    SUM(f.quantity) AS total_units,\n    RANK() OVER (PARTITION BY p.category_name ORDER BY SUM(f.total_amount) DESC) AS rank_in_category\n  FROM DW.FACT_SALES f\n  JOIN DW.DIM_PRODUCT p ON f.product_id = p.product_id\n  JOIN DW.DIM_DATE d ON f.date_key = d.date_key\n  WHERE d.day_date >= DATEADD(MONTH, -12, CURRENT_DATE())\n  GROUP BY p.product_id, p.product_name, p.brand, p.category_name\n)\nSELECT * FROM ranked_products\nWHERE rank_in_category <= 10;"
+  },
+  {
+    "name": "V_INVENTORY_HEALTH",
+    "object_type": "view",
+    "schema_name": "DW",
+    "ddl": "CREATE VIEW LAB_DB.DW.V_INVENTORY_HEALTH AS\nSELECT\n  i.store_id,\n  s.store_name,\n  i.product_id,\n  p.product_name,\n  i.quantity_on_hand,\n  i.reorder_point,\n  i.days_of_supply,\n  CASE\n    WHEN i.quantity_on_hand <= 0 THEN 'OUT_OF_STOCK'\n    WHEN i.quantity_on_hand < i.reorder_point THEN 'LOW_STOCK'\n    WHEN i.days_of_supply > 90 THEN 'OVERSTOCK'\n    ELSE 'HEALTHY'\n  END AS stock_status\nFROM DW.FACT_INVENTORY i\nJOIN DW.DIM_STORE s ON i.store_id = s.store_id\nJOIN DW.DIM_PRODUCT p ON i.product_id = p.product_id;"
+  },
+  {
+    "name": "V_RETURN_ANALYSIS",
+    "object_type": "view",
+    "schema_name": "DW",
+    "ddl": "CREATE VIEW LAB_DB.DW.V_RETURN_ANALYSIS AS\nWITH return_rates AS (\n  SELECT\n    p.product_id,\n    p.product_name,\n    p.category_name,\n    COUNT(DISTINCT r.return_id) AS return_count,\n    COUNT(DISTINCT f.sale_id) AS sale_count,\n    SUM(r.refund_amount) AS total_refunds\n  FROM DW.FACT_SALES f\n  LEFT JOIN DW.FACT_RETURNS r ON f.sale_id = r.sale_id\n  JOIN DW.DIM_PRODUCT p ON f.product_id = p.product_id\n  GROUP BY p.product_id, p.product_name, p.category_name\n)\nSELECT\n  *,\n  ROUND(return_count * 100.0 / NULLIF(sale_count, 0), 2) AS return_rate_pct\nFROM return_rates;"
+  },
+  {
+    "name": "V_OLD_DEV_SCRATCH",
+    "object_type": "view",
+    "schema_name": "DW_DEV",
+    "ddl": "CREATE VIEW LAB_DB.DW_DEV.V_OLD_DEV_SCRATCH AS\nSELECT * FROM DW_DEV.JUNK_TEMP_DATA WHERE 1=0;"
+  },
+
+  {"comment": "=== TABLES: fact, dimension, staging, support, legacy ==="},
+
+  {
+    "name": "DIM_STORE",
+    "object_type": "table",
+    "schema_name": "DW",
+    "ddl": "CREATE TABLE LAB_DB.DW.DIM_STORE (\n  store_id INT PRIMARY KEY,\n  store_name VARCHAR(200),\n  city VARCHAR(100),\n  state_code VARCHAR(10),\n  country_code VARCHAR(5),\n  region_name VARCHAR(100),\n  open_date DATE,\n  close_date DATE,\n  store_type VARCHAR(50),\n  square_footage INT,\n  etl_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),\n  etl_updated_at TIMESTAMP\n);"
+  },
+  {
+    "name": "DIM_PRODUCT",
+    "object_type": "table",
+    "schema_name": "DW",
+    "ddl": "CREATE TABLE LAB_DB.DW.DIM_PRODUCT (\n  product_id INT PRIMARY KEY,\n  sku VARCHAR(50),\n  product_name VARCHAR(300),\n  brand VARCHAR(100),\n  category_name VARCHAR(100),\n  subcategory_name VARCHAR(100),\n  unit_cost DECIMAL(12,2),\n  unit_price DECIMAL(12,2),\n  is_active BOOLEAN DEFAULT TRUE,\n  etl_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),\n  etl_updated_at TIMESTAMP\n);"
+  },
+  {
+    "name": "DIM_DATE",
+    "object_type": "table",
+    "schema_name": "DW",
+    "ddl": "CREATE TABLE LAB_DB.DW.DIM_DATE (\n  date_key INT PRIMARY KEY,\n  day_date DATE NOT NULL,\n  year_num INT,\n  quarter_num INT,\n  month_num INT,\n  week_num INT,\n  day_of_week INT,\n  is_weekend BOOLEAN,\n  fiscal_year INT,\n  fiscal_quarter INT\n);"
+  },
+  {
+    "name": "DIM_PROMOTION",
+    "object_type": "table",
+    "schema_name": "DW",
+    "ddl": "CREATE TABLE LAB_DB.DW.DIM_PROMOTION (\n  promo_id INT PRIMARY KEY,\n  promo_name VARCHAR(200),\n  discount_type VARCHAR(20),\n  discount_value DECIMAL(8,2),\n  start_date DATE,\n  end_date DATE,\n  etl_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),\n  etl_updated_at TIMESTAMP\n);"
+  },
+  {
+    "name": "FACT_SALES",
+    "object_type": "table",
+    "schema_name": "DW",
+    "ddl": "CREATE TABLE LAB_DB.DW.FACT_SALES (\n  sale_id BIGINT PRIMARY KEY,\n  store_id INT REFERENCES DW.DIM_STORE(store_id),\n  product_id INT REFERENCES DW.DIM_PRODUCT(product_id),\n  date_key INT REFERENCES DW.DIM_DATE(date_key),\n  quantity INT,\n  unit_price DECIMAL(12,2),\n  discount_pct DECIMAL(5,2),\n  net_amount DECIMAL(14,2),\n  tax_amount DECIMAL(10,2),\n  total_amount DECIMAL(14,2),\n  currency_code VARCHAR(3) DEFAULT 'USD',\n  total_amount_usd DECIMAL(14,2),\n  etl_batch_id VARCHAR(50),\n  etl_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()\n);"
+  },
+  {
+    "name": "FACT_INVENTORY",
+    "object_type": "table",
+    "schema_name": "DW",
+    "ddl": "CREATE TABLE LAB_DB.DW.FACT_INVENTORY (\n  snapshot_date DATE,\n  store_id INT,\n  product_id INT,\n  quantity_on_hand INT,\n  quantity_on_order INT,\n  reorder_point INT,\n  days_of_supply DECIMAL(8,1),\n  etl_batch_id VARCHAR(50)\n);"
+  },
+  {
+    "name": "FACT_RETURNS",
+    "object_type": "table",
+    "schema_name": "DW",
+    "ddl": "CREATE TABLE LAB_DB.DW.FACT_RETURNS (\n  return_id BIGINT PRIMARY KEY,\n  sale_id BIGINT REFERENCES DW.FACT_SALES(sale_id),\n  store_id INT,\n  product_id INT,\n  return_date DATE,\n  quantity INT,\n  reason_code VARCHAR(20),\n  refund_amount DECIMAL(12,2),\n  etl_batch_id VARCHAR(50)\n);"
+  },
+  {
+    "name": "AGG_DAILY_SALES",
+    "object_type": "table",
+    "schema_name": "DW",
+    "ddl": "CREATE TABLE LAB_DB.DW.AGG_DAILY_SALES (\n  day_date DATE,\n  store_id INT,\n  total_sales DECIMAL(16,2),\n  total_qty INT,\n  avg_ticket DECIMAL(12,2)\n);"
+  },
+  {
+    "name": "RAW_TRANSACTIONS",
+    "object_type": "table",
+    "schema_name": "STAGING",
+    "ddl": "CREATE TABLE LAB_DB.STAGING.RAW_TRANSACTIONS (\n  transaction_id BIGINT,\n  store_code INT,\n  sku VARCHAR(50),\n  sale_date DATE,\n  quantity INT,\n  unit_price DECIMAL(12,2),\n  discount_pct DECIMAL(5,2),\n  tax_amount DECIMAL(10,2),\n  loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()\n);"
+  },
+  {
+    "name": "RAW_STORES",
+    "object_type": "table",
+    "schema_name": "STAGING",
+    "ddl": "CREATE TABLE LAB_DB.STAGING.RAW_STORES (\n  store_id INT,\n  store_name VARCHAR(200),\n  city VARCHAR(100),\n  state_code VARCHAR(10),\n  country_code VARCHAR(5),\n  region_id INT,\n  open_date DATE,\n  close_date DATE,\n  store_type VARCHAR(50),\n  square_footage INT\n);"
+  },
+  {
+    "name": "RAW_PRODUCTS",
+    "object_type": "table",
+    "schema_name": "STAGING",
+    "ddl": "CREATE TABLE LAB_DB.STAGING.RAW_PRODUCTS (\n  product_id INT,\n  sku VARCHAR(50),\n  product_name VARCHAR(300),\n  brand VARCHAR(100),\n  category_id INT,\n  unit_cost DECIMAL(12,2),\n  unit_price DECIMAL(12,2),\n  is_active BOOLEAN\n);"
+  },
+  {
+    "name": "ETL_LOG",
+    "object_type": "table",
+    "schema_name": "DW",
+    "ddl": "CREATE TABLE LAB_DB.DW.ETL_LOG (\n  log_id INT AUTOINCREMENT,\n  log_message VARCHAR(1000),\n  log_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),\n  log_level VARCHAR(20)\n);"
+  },
+  {
+    "name": "ETL_BATCH",
+    "object_type": "table",
+    "schema_name": "DW",
+    "ddl": "CREATE TABLE LAB_DB.DW.ETL_BATCH (\n  batch_id INT AUTOINCREMENT PRIMARY KEY,\n  status VARCHAR(20) DEFAULT 'PENDING',\n  started_at TIMESTAMP,\n  finished_at TIMESTAMP,\n  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()\n);"
+  },
+  {
+    "name": "LKP_REGION",
+    "object_type": "table",
+    "schema_name": "DW",
+    "ddl": "CREATE TABLE LAB_DB.DW.LKP_REGION (\n  region_id INT PRIMARY KEY,\n  region_name VARCHAR(100),\n  region_code VARCHAR(10)\n);"
+  },
+  {
+    "name": "LKP_EXCHANGE_RATES",
+    "object_type": "table",
+    "schema_name": "DW",
+    "ddl": "CREATE TABLE LAB_DB.DW.LKP_EXCHANGE_RATES (\n  source_currency VARCHAR(3),\n  target_currency VARCHAR(3),\n  exchange_rate DECIMAL(12,6),\n  effective_from DATE,\n  effective_to DATE\n);"
+  },
+  {
+    "name": "JUNK_TEMP_DATA",
+    "object_type": "table",
+    "schema_name": "DW_DEV",
+    "ddl": "CREATE TABLE LAB_DB.DW_DEV.JUNK_TEMP_DATA (\n  id INT,\n  payload VARCHAR(4000),\n  created_at TIMESTAMP\n);"
+  },
+  {
+    "name": "FACT_SALES_BAK",
+    "object_type": "table",
+    "schema_name": "DW_DEV"
+  }
+]

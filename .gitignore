@@ -19,6 +19,11 @@ env/
 *.db
 *.sqlite3
 
+# Proprietary data (real Snowflake DDL — not for public repo)
+data/sp_output.json
+data/sp_categorization.json
+kpi/
+
 # OS
 .DS_Store
 Thumbs.db
