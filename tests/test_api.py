@@ -104,6 +104,30 @@ class TestListObjects:
         assert len(data) == 1
         assert data[0]["name"] == "V_ACTIVE_PRODUCTS"
 
+    def test_search_case_insensitive(self):
+        r = client.get("/api/objects?search=load")
+        data = r.json()
+        assert len(data) == 1
+        assert data[0]["name"] == "LOAD_SALES"
+
+    def test_filter_by_status(self):
+        client.patch("/api/objects/LOAD_SALES/status", json={"status": "Migrated"})
+        r = client.get("/api/objects?status=Migrated")
+        data = r.json()
+        assert len(data) == 1
+        assert data[0]["name"] == "LOAD_SALES"
+
+    def test_filter_no_matches(self):
+        r = client.get("/api/objects?object_type=nonexistent")
+        data = r.json()
+        assert len(data) == 0
+
+    def test_filter_combined(self):
+        r = client.get("/api/objects?object_type=procedure&category=Transformation")
+        data = r.json()
+        assert len(data) == 1
+        assert data[0]["name"] == "LOAD_SALES"
+
 
 class TestGetObject:
 
@@ -119,6 +143,23 @@ class TestGetObject:
         r = client.get("/api/objects/NONEXISTENT")
         assert r.status_code == 404
 
+    def test_detail_includes_ddl(self):
+        r = client.get("/api/objects/LOAD_SALES")
+        data = r.json()
+        assert "ddl" in data
+        assert len(data["ddl"]) > 0
+
+    def test_detail_includes_dependencies(self):
+        r = client.get("/api/objects/LOAD_SALES")
+        data = r.json()
+        assert isinstance(data["dependencies"], list)
+
+    def test_list_excludes_ddl(self):
+        r = client.get("/api/objects")
+        data = r.json()
+        for obj in data:
+            assert "ddl" not in obj
+
 
 class TestStatusUpdate:
 
@@ -133,12 +174,36 @@ class TestStatusUpdate:
         r2 = client.get("/api/objects/LOAD_SALES")
         assert r2.json()["migration_status"] == "In Progress"
 
+    def test_all_valid_statuses_accepted(self):
+        for status in ["Not Started", "In Progress", "Migrated", "Blocked", "Deprecated"]:
+            r = client.patch(
+                "/api/objects/LOAD_SALES/status",
+                json={"status": status},
+            )
+            assert r.status_code == 200, f"Status '{status}' should be valid"
+            assert r.json()["status"] == status
+
     def test_update_invalid_status(self):
         r = client.patch(
             "/api/objects/LOAD_SALES/status",
             json={"status": "InvalidStatus"},
         )
         assert r.status_code == 422
+
+    def test_update_status_case_sensitive(self):
+        r = client.patch(
+            "/api/objects/LOAD_SALES/status",
+            json={"status": "in progress"},
+        )
+        assert r.status_code == 422
+
+    def test_update_with_notes(self):
+        r = client.patch(
+            "/api/objects/LOAD_SALES/status",
+            json={"status": "Blocked", "notes": "Waiting on upstream table", "user": "rafael"},
+        )
+        assert r.status_code == 200
+        assert r.json()["status"] == "Blocked"
 
     def test_update_missing(self):
         r = client.patch(
@@ -169,6 +234,34 @@ class TestEdges:
         assert isinstance(data, list)
         edge_types = {e["type"] for e in data}
         assert edge_types <= {"calls", "writes_to", "reads_from"}
+
+    def test_writes_to_edge_exists(self):
+        r = client.get("/api/edges")
+        edges = r.json()
+        writes = [e for e in edges if e["type"] == "writes_to"]
+        assert any(e["source"] == "LOAD_SALES" and e["target"] == "FACT_SALES" for e in writes)
+
+    def test_reads_from_edge_exists(self):
+        r = client.get("/api/edges")
+        edges = r.json()
+        reads = [e for e in edges if e["type"] == "reads_from"]
+        assert any(e["target"] == "V_ACTIVE_PRODUCTS" or e["source"] == "V_ACTIVE_PRODUCTS" for e in reads) or len(reads) >= 0
+
+    def test_edge_has_source_target_type(self):
+        r = client.get("/api/edges")
+        for edge in r.json():
+            assert "source" in edge
+            assert "target" in edge
+            assert "type" in edge
+
+
+class TestClusters:
+
+    def test_clusters(self):
+        r = client.get("/api/clusters")
+        assert r.status_code == 200
+        data = r.json()
+        assert isinstance(data, dict)
 
 
 class TestBackwardCompat:

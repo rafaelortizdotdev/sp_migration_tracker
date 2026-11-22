@@ -91,12 +91,12 @@ class TestSplitUnsplit:
         assert r.status_code == 200
         data = r.json()
         assert data["original_hidden"] is True
-        assert len(data["created_nodes"]) >= 2
+        assert len(data["created_nodes"]) == 2
 
         vn = client.get("/api/virtual-nodes")
         assert vn.status_code == 200
         nodes = vn.json()
-        assert len(nodes) >= 2
+        assert len(nodes) == 2
 
         r2 = client.post(
             "/api/nodes/REFRESH_INVENTORY/unsplit",
@@ -106,6 +106,62 @@ class TestSplitUnsplit:
 
         vn2 = client.get("/api/virtual-nodes")
         assert len(vn2.json()) == 0
+
+    def test_split_creates_correct_names(self):
+        r = client.post(
+            "/api/nodes/REFRESH_INVENTORY/split",
+            json={"user": "test"},
+        )
+        data = r.json()
+        names = [n["name"] for n in data["created_nodes"]]
+        assert "REFRESH_INVENTORY_ORCH" in names
+        assert "REFRESH_INVENTORY_LOGIC" in names
+
+    def test_split_orch_inherits_calls(self):
+        r = client.post(
+            "/api/nodes/REFRESH_INVENTORY/split",
+            json={"user": "test"},
+        )
+        data = r.json()
+        orch = next(n for n in data["created_nodes"] if n["type"] == "orchestrator")
+        assert "UPDATE_AGGREGATES" in orch["inherited_calls"]
+        assert orch["inherited_tables"] == []
+
+    def test_split_logic_inherits_tables(self):
+        r = client.post(
+            "/api/nodes/REFRESH_INVENTORY/split",
+            json={"user": "test"},
+        )
+        data = r.json()
+        logic = next(n for n in data["created_nodes"] if n["type"] == "transformation")
+        assert "DW.FACT_INV" in logic["inherited_tables"]
+        assert logic["inherited_calls"] == []
+
+    def test_double_split_rejected(self):
+        client.post("/api/nodes/REFRESH_INVENTORY/split", json={"user": "test"})
+        r2 = client.post("/api/nodes/REFRESH_INVENTORY/split", json={"user": "test"})
+        assert r2.status_code == 400
+        assert "Already split" in r2.json()["detail"]
+
+    def test_unsplit_non_split_rejected(self):
+        r = client.post(
+            "/api/nodes/UPDATE_AGGREGATES/unsplit",
+            json={"user": "test"},
+        )
+        assert r.status_code == 400
+
+    def test_split_hides_from_default_listing(self):
+        client.post("/api/nodes/REFRESH_INVENTORY/split", json={"user": "test"})
+        r = client.get("/api/objects")
+        names = [o["name"] for o in r.json()]
+        assert "REFRESH_INVENTORY" not in names
+        assert "REFRESH_INVENTORY_ORCH" in names or any("_ORCH" in n for n in names)
+
+    def test_split_visible_with_include_hidden(self):
+        client.post("/api/nodes/REFRESH_INVENTORY/split", json={"user": "test"})
+        r = client.get("/api/objects?include_hidden=true")
+        names = [o["name"] for o in r.json()]
+        assert "REFRESH_INVENTORY" in names
 
     def test_split_non_hybrid_rejected(self):
         r = client.post(
@@ -120,6 +176,17 @@ class TestSplitUnsplit:
             "/api/nodes/NONEXISTENT/split",
             json={"user": "test"},
         )
+        assert r.status_code == 404
+
+    def test_unsplit_nonexistent(self):
+        r = client.post(
+            "/api/nodes/NONEXISTENT/unsplit",
+            json={"user": "test"},
+        )
+        assert r.status_code == 404
+
+    def test_preview_nonexistent(self):
+        r = client.get("/api/nodes/NONEXISTENT/split-preview")
         assert r.status_code == 404
 
 
